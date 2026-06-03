@@ -1,0 +1,23 @@
+[package]
+name         = "princeps-node"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+rdk-clob        = { workspace = true }
+rdk-funding     = { workspace = true }
+rdk-liquidation = { workspace = true }
+rdk-oracle      = { workspace = true }
+rdk-vault       = { workspace = true }
+serde           = { workspace = true }
+
+[dev-dependencies]
+proptest   = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

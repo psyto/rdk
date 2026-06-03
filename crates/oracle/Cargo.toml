@@ -1,0 +1,19 @@
+[package]
+name         = "rdk-oracle"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+rdk-funding = { workspace = true }
+k256           = { version = "0.13", default-features = false, features = ["ecdsa", "std", "precomputed-tables"] }
+serde          = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

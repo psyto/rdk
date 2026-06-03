@@ -1,0 +1,28 @@
+[package]
+name         = "princeps-liquidator-bot"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+
+[[bin]]
+name = "princeps-liquidator-bot"
+path = "src/main.rs"
+
+[dependencies]
+rdk-clearing     = { workspace = true }
+rdk-clob         = { workspace = true }
+princeps-evm     = { workspace = true }
+rdk-funding      = { workspace = true }
+princeps-lending = { workspace = true }
+
+alloy-genesis  = { workspace = true }
+clap           = { version = "4.6", features = ["derive"] }
+eyre           = { workspace = true }
+reth-chainspec = { workspace = true }
+serde_json     = { workspace = true }
+
+[lints]
+workspace = true

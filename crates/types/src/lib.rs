@@ -1,0 +1,54 @@
+//! Shared primitives and CL/EL contract types.
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+/// 32-byte block hash, Ethereum convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BlockHash(pub [u8; 32]);
+
+impl fmt::Display for BlockHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("0x")?;
+        for b in &self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Identifier returned by `build_payload`; used to retrieve the assembled block via `payload_ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PayloadId(pub u64);
+
+/// Inputs to a payload-build job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayloadAttrs {
+    pub timestamp: u64,
+    pub fee_recipient: [u8; 20],
+    pub prev_randao: [u8; 32],
+}
+
+/// Verdict from `validate_payload`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PayloadStatus {
+    Valid,
+    Invalid,
+    Syncing,
+}
+
+/// An executed block — the artifact a consensus round commits to. Minimal v0 shape; txs and receipts land per Module 2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutedBlock {
+    pub hash: BlockHash,
+    pub parent_hash: BlockHash,
+    pub number: u64,
+    pub state_root: [u8; 32],
+    /// Unix-seconds timestamp from the header. Both validators compute
+    /// the same value deterministically (proposer's `build_payload`
+    /// derives it from `parent.timestamp + 1` when the attrs timestamp
+    /// is stale), so it is safe to use as the chain's notion of
+    /// "block time" instead of host wallclock.
+    pub timestamp: u64,
+}

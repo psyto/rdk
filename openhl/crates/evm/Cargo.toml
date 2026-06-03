@@ -1,0 +1,56 @@
+[package]
+name         = "openhl-evm"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+openhl-consensus         = { workspace = true }
+rdk-types                = { workspace = true }
+rdk-clob                 = { workspace = true }
+rdk-clearing             = { workspace = true }
+rdk-funding              = { workspace = true }
+rdk-liquidation          = { workspace = true }
+async-trait              = { workspace = true }
+eyre                     = { workspace = true }
+alloy-primitives         = { workspace = true, features = ["serde"] }
+alloy-consensus          = { workspace = true, features = ["serde"] }
+serde                    = { workspace = true }
+serde_json               = { workspace = true }
+reth-ethereum-primitives = { workspace = true }
+reth-storage-api         = { workspace = true }
+reth-consensus           = { workspace = true }
+reth-ethereum-consensus  = { workspace = true }
+reth-primitives-traits   = { workspace = true }
+reth-chainspec           = { workspace = true }
+reth-evm                 = { workspace = true }
+reth-evm-ethereum        = { workspace = true }
+reth-node-api            = { git = "https://github.com/paradigmxyz/reth", rev = "88505c7fcbfdebfd3b56d88c86b62e950043c6c4" }
+reth-node-builder        = { workspace = true }
+alloy-evm                = { workspace = true }
+reth-engine-primitives          = { workspace = true }
+reth-ethereum-engine-primitives = { workspace = true }
+reth-payload-builder            = { workspace = true }
+alloy-rpc-types-engine          = { workspace = true }
+
+[dev-dependencies]
+tokio                = { workspace = true }
+reth-node-builder    = { workspace = true, features = ["test-utils"] }
+reth-node-ethereum   = { workspace = true, features = ["test-utils"] }
+reth-node-core       = { workspace = true }
+reth-tasks           = { workspace = true }
+reth-provider        = { workspace = true }
+reth-transaction-pool = { workspace = true }
+reth-rpc-eth-types   = { workspace = true }
+alloy-genesis        = { workspace = true }
+alloy-network        = { workspace = true }
+alloy-signer         = { workspace = true }
+alloy-signer-local   = { workspace = true }
+alloy-eips           = { workspace = true }
+tempfile             = "3"
+
+[lints]
+workspace = true

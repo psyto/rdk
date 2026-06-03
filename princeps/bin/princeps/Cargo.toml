@@ -1,0 +1,52 @@
+[package]
+name         = "princeps"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+
+[[bin]]
+name = "princeps"
+path = "src/main.rs"
+
+[dependencies]
+rdk-clearing       = { workspace = true }
+rdk-clob           = { workspace = true }
+princeps-consensus = { workspace = true }
+princeps-evm       = { workspace = true }
+rdk-funding        = { workspace = true }
+princeps-lending   = { workspace = true }
+rdk-liquidation    = { workspace = true }
+princeps-node      = { workspace = true }
+rdk-oracle         = { workspace = true }
+rdk-types          = { workspace = true }
+
+clap  = { version = "4.6", features = ["derive"] }
+eyre  = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+reth-node-builder  = { workspace = true }
+reth-node-core     = { workspace = true }
+reth-node-ethereum = { workspace = true }
+reth-tasks         = { workspace = true }
+reth-chainspec     = { workspace = true }
+reth-db            = { workspace = true }
+alloy-genesis      = { workspace = true }
+alloy-primitives   = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+informalsystems-malachitebft-app             = { workspace = true }
+informalsystems-malachitebft-signing-ed25519 = { workspace = true, features = ["rand"] }
+ed25519-consensus                            = "2"
+rand               = "0.8"
+sha2               = "0.10"
+hex                = "0.4"
+tempfile           = "3"
+k256               = { version = "0.13", default-features = false, features = ["ecdsa", "std", "precomputed-tables"] }
+
+[lints]
+workspace = true
