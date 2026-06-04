@@ -49,15 +49,17 @@ Operator solvency is not a protocol-enforceable property at v0–v1; this is the
 
 ### Layer 3 — socialized loss (fallback, requires operator declaration)
 
-> **Implementation deferred (recorded 2026-06-04).** When this section was written, Layer 3 was specified against a v1+ surface that doesn't exist at v0:
+> **Resolved (2026-06-04).** Deferral note above remains as the historical record. Each named dependency landed:
 >
-> 1. **No per-depositor positions.** `lending::Position` tracks `collateral_amount` + `scaled_debt` (borrower-side only). No `scaled_supply` field. v0's supply side is the bridge itself — a pre-funded, bridge-owned pool. `accrual.rs` is explicit: "v0 ships without supplier-side `supply_index` accounting."
-> 2. **No princeps-side chain history.** The per-block event replay the section references lives in `openhl/bin/openhl/src/main.rs::chain_history`. Princeps hasn't pulled it across.
-> 3. **No operator-sig admission infrastructure.** The closest pattern is `oracle::PublisherKey` ECDSA — per-publisher, not per-operator. Layer 2's operator agreement ([`operator-agreement.md`](../operator-agreement.md)) is legal-only, not cryptographic.
+> 1. **Per-depositor `scaled_supply` foundation** — `b1b5981` (`feat(lending): v1 scaled_supply foundation`). Position gains `scaled_supply: u128` with `#[serde(default)]` for legacy compat; `nominal_supply(supply_index)` accessor; `position::supply` / `position::withdraw_supply` pure functions; `accrual.rs` grows `supply_index` per the Aave-standard `supply_rate = borrow_rate × utilization × (1 − reserve_factor)`. Bridge-owned implicit pool stays additive.
+> 2. **Princeps-side chain history** — `406ba5a` (`feat(bin): princeps chain history`). `ChainEvent` enum, `ChainHistory` wire format, `ChainHistoryStore` runtime handle with thread-safe append + boot-time replay. `ChainEvent::Socialization { market_id, unfilled, declared_by }` is the variant Layer 3 emits.
+> 3. **Operator-sig admission** — `906d659` (`feat(node): operator-sig admission`). `OperatorRegistry`, `OperatorKey`, `SocializationDeclaration` with `signed_bytes()` canonical big-endian encoding, `verify_socialization_declaration` returning `Result<OperatorId, OperatorAuthError>`. Block-height binding gives replay protection.
 >
-> v0 therefore has **no third-party depositor population to socialize against** — the bridge-owned pool absorbs any residual that Layer 2 declines, which is operationally equivalent to operator-cap. The three infrastructure dependencies above are themselves a substantial design space (per-asset positions, princeps-side chain history, operator-key registry) that should not be sneaked in via Layer 3. Implementation is gated on the v1 multi-asset / scaled_supply work (currently outside the v0 lending plan); the surface specified below is the design target for that work to satisfy.
+> Bonus dependency cleared along the way — `d46f379` added user-facing supplier-side EVM precompiles (`lending_supply` / `lending_withdraw_supply`) so external depositors actually have a path to acquire scaled_supply positions at v1.
 >
-> Until that point, Layer 1 + Layer 2 fully cover the v0 threat surface for L-5 — see threat-model row L-5.
+> The Layer 3 primitive itself landed in this commit cycle as `princeps/crates/lending/src/socialization.rs::socialize_residual` — pure-compute, takes `&mut Market` + `unfilled: u128`, returns `SocializationReport` with full before/after state. Math: `absorbed = min(unfilled, total_supplied)`, `new_supply_index = supply_index × (total_supplied − absorbed) / total_supplied`, `new_total_supplied = total_supplied − absorbed`. Per-account positions are repriced implicitly via the index; the bridge-owned implicit pool absorbs proportionally so the conservation `sum(per-position nominal) + bridge_implicit ≡ total_supplied` holds across the haircut.
+>
+> Bridge-side wiring (CLI command to receive a signed declaration, route through `verify_socialization_declaration` → `socialize_residual` → `ChainHistoryStore::append_event`) is operational follow-up; the protocol primitive is complete.
 
 If the operator declares Layer 2 cannot cover, lender principal absorbs the residual `unfilled` amount pro-rata across all USDC depositors at the moment of declaration. The mechanics are:
 
@@ -108,8 +110,15 @@ Layered status as of 2026-06-04:
   - 12 new tests in `princeps-node` (arm/extend/expiry/burst-rollout/snapshot-roundtrip/serde-default/accumulator).
 - **Layer 2 ✅ landed** (`139a93c`):
   - Operator agreement [`princeps/docs/operator-agreement.md`](../operator-agreement.md) — §4 lending halt make-whole, §5 72-hour disclosure. v0 template, signed instances awaited at v1 mainnet onboarding.
-- **Layer 3 deferred** to v1 multi-asset / `scaled_supply` work — see the Decision > Layer 3 deferral note above. Gated on: `scaled_supply` field on `lending::Position`, princeps-side chain history (port the openhl Stage 21 pattern), and operator-sig admission infrastructure (likely ECDSA against an operator-key registry, mirroring `oracle::PublisherKey`).
-- **Threat-model L-5 row**: updated 2026-06-04 to reflect Layer 1 ✅ + Layer 2 ✅ + Layer 3 deferred.
-- **`princeps/docs/plans/v0-lending.md`** — Layer 1/2 status entries TBD; the "Open questions / risks" L-5 mention can be marked resolved-for-v0 once this ADR's deferral note is accepted.
+- **Layer 3 ✅ landed**:
+  - Dep 1 (`scaled_supply`): `b1b5981`. Supplier-side foundation in `princeps-lending` (`scaled_supply` field, `nominal_supply` accessor, `supply` / `withdraw_supply` pure functions, supplier-side accrual). 86/86 tests.
+  - Bonus (supplier precompiles): `d46f379`. User-facing `lending_supply` / `lending_withdraw_supply` EVM precompiles at 0x...0c25 / 0x...0c26 plus utilization safety gate. 91/91 tests in princeps-evm.
+  - Dep 2 (chain history): `406ba5a`. `princeps/bin/princeps/src/chain_history.rs` — unified replay + append event log. 11/11 tests.
+  - Dep 3 (operator-sig): `906d659`. `princeps/crates/node/src/operator.rs` — ECDSA-verified `SocializationDeclaration`, replay-protected via `block_height`. 51/51 tests in princeps-node.
+  - Layer 3 primitive: `princeps/crates/lending/src/socialization.rs::socialize_residual`. 95/95 tests in princeps-lending.
+- **Threat-model L-5 row**: updated 2026-06-04 to ✅ across all three layers; Layer 3 row gains the new `socialize_residual` reference.
+- **`princeps/docs/plans/v0-lending.md`** — "Open questions / risks" L-5 mention can be marked resolved.
+
+**Open follow-up (operational, not protocol)**: a bridge-side wrapper that accepts a signed `SocializationDeclaration` (CLI subcommand at v0; EVM precompile at v1), routes it through `verify_socialization_declaration` → `socialize_residual` against the bridge-owned `MARKETS_STATE` → `ChainHistoryStore::append_event`. The protocol primitives are in place; this wiring is the entrypoint to expose them to operators.
 
 Estimated scope: ~300 LOC + tests, mirrors the `oracle_halt_until` change as a baseline.

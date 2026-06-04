@@ -27,6 +27,7 @@ pub mod accrual;
 pub mod health;
 pub mod irm;
 pub mod position;
+pub mod socialization;
 pub mod types;
 
 pub use accrual::{accrue_interest, InterestAccrualReport};
@@ -36,4 +37,5 @@ pub use position::{
     borrow, deposit_collateral, repay, supply, withdraw_collateral, withdraw_supply,
     LendingError,
 };
+pub use socialization::{socialize_residual, SocializationError, SocializationReport};
 pub use types::{AssetId, Bps, Index, IrmParams, Market, MarketId, Position};
