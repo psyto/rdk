@@ -233,11 +233,46 @@ pub const PRINCEPS_LENDING_SOCIALIZE: Address =
 pub const PRINCEPS_LENDING_WITHDRAW_SUPPLY: Address =
     address!("0x0000000000000000000000000000000000000c26");
 
-/// Base gas for lending precompiles (Stage 21). Higher than CLOB because
-/// of per-position state mutation + market totals update + (for borrow/
-/// withdraw/health) compute_health_factor evaluation. v0 setting; tuned
-/// by testnet load profiling.
-const LENDING_BASE_GAS_COST: u64 = 2_000;
+/// Per-precompile gas costs for the lending dispatch (E-4 partial close).
+///
+/// Threat-model row E-4 flagged the original uniform `LENDING_BASE_GAS_COST`
+/// as a precondition for testnet → mainnet promotion ("precompile gas
+/// costs are not yet set against benchmark data"). For v0 we differentiate
+/// by computational class rather than measured cycles — that's enough to
+/// avoid the worst "cheap call subsidizes expensive call" distortion,
+/// and the relative ordering matches the precompiles' actual work. Real
+/// criterion benchmarks against a reference workload remain pre-mainnet
+/// work (see threat-model E-4 ✅/🚧 status).
+///
+/// Ordering by expected cost (ascending). Numbers are educated guesses
+/// loosely calibrated against existing Ethereum precompiles (`ECRECOVER`
+/// is 3_000; `BN_PAIRING` is 45_000 + 34_000/pair; `SHA256` is 60 +
+/// 12/word) — i.e., the lending precompiles sit in the "moderate
+/// fixed work + small dynamic" band, which is where these constants
+/// land:
+///
+///   1_500  HEALTH                 read-only; one compute_health_factor
+///   2_000  DEPOSIT_COLLATERAL     single position mutation, no risk math
+///   2_500  REPAY                  position mutation + nominal_debt
+///   2_500  SUPPLY                 mirror of REPAY on the supplier side
+///   3_000  WITHDRAW_SUPPLY        + utilization safety gate
+///   4_000  BORROW                 + compute_health_factor on hypothetical
+///   4_000  WITHDRAW_COLLATERAL    + compute_health_factor on hypothetical
+///   6_000  LIQUIDATE              cross-account; bonus calc; 2 mutations
+///   8_000  SOCIALIZE              ECDSA verify + market mutation + event
+///
+/// Each handler uses its specific constant for both success and the
+/// all-zero error path — gas pricing must NOT differ by validation
+/// outcome, otherwise observer effects leak that information to callers.
+const LENDING_HEALTH_GAS_COST: u64 = 1_500;
+const LENDING_DEPOSIT_COLLATERAL_GAS_COST: u64 = 2_000;
+const LENDING_REPAY_GAS_COST: u64 = 2_500;
+const LENDING_SUPPLY_GAS_COST: u64 = 2_500;
+const LENDING_WITHDRAW_SUPPLY_GAS_COST: u64 = 3_000;
+const LENDING_BORROW_GAS_COST: u64 = 4_000;
+const LENDING_WITHDRAW_COLLATERAL_GAS_COST: u64 = 4_000;
+const LENDING_LIQUIDATE_GAS_COST: u64 = 6_000;
+const LENDING_SOCIALIZE_GAS_COST: u64 = 8_000;
 
 /// Monotonic order-ID counter for orders placed via the EVM. Starts at 1
 /// so the sentinel value 0 (returned on rejection) is distinguishable from
@@ -877,7 +912,7 @@ pub(crate) fn lending_deposit(
     let zero_out = vec![0u8; 32];
     if input.len() < 96 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_DEPOSIT_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -893,7 +928,7 @@ pub(crate) fn lending_deposit(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_DEPOSIT_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -902,7 +937,7 @@ pub(crate) fn lending_deposit(
     let markets_guard = markets.lock().expect("markets mutex poisoned");
     if !markets_guard.contains_key(&MarketId(market_id)) {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_DEPOSIT_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -916,7 +951,7 @@ pub(crate) fn lending_deposit(
         .or_insert_with(|| Position::empty(MarketId(market_id)));
     if lending_position_deposit_collateral(position, amount).is_err() {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_DEPOSIT_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -925,7 +960,7 @@ pub(crate) fn lending_deposit(
     drop(positions_guard);
 
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_DEPOSIT_COLLATERAL_GAS_COST,
         Bytes::from(u128_in_low_word(new_collateral)),
         0,
     ))
@@ -941,7 +976,7 @@ pub(crate) fn lending_borrow(
     let zero_out = vec![0u8; 32];
     if input.len() < 160 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_BORROW_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -959,7 +994,7 @@ pub(crate) fn lending_borrow(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_BORROW_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -968,21 +1003,21 @@ pub(crate) fn lending_borrow(
     let mut markets_guard = markets.lock().expect("markets mutex poisoned");
     let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_BORROW_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
     };
     let Some(new_borrowed) = market.total_borrowed.checked_add(amount) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_BORROW_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
     };
     if new_borrowed > market.total_supplied {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_BORROW_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -998,7 +1033,7 @@ pub(crate) fn lending_borrow(
     let mut hypothetical = existing;
     if lending_position_borrow(&mut hypothetical, amount, market.borrow_index).is_err() {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_BORROW_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1006,7 +1041,7 @@ pub(crate) fn lending_borrow(
     let hf = lending_compute_health_factor(&hypothetical, market, collateral_price, debt_price);
     if hf < LendingIndex::RAY {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_BORROW_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1016,7 +1051,7 @@ pub(crate) fn lending_borrow(
 
     // success = 1
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_BORROW_GAS_COST,
         Bytes::from(u128_in_low_word(1)),
         0,
     ))
@@ -1032,7 +1067,7 @@ pub(crate) fn lending_repay(
     let zero_out = vec![0u8; 32];
     if input.len() < 96 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_REPAY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1048,7 +1083,7 @@ pub(crate) fn lending_repay(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_REPAY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1057,7 +1092,7 @@ pub(crate) fn lending_repay(
     let mut markets_guard = markets.lock().expect("markets mutex poisoned");
     let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_REPAY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1067,14 +1102,14 @@ pub(crate) fn lending_repay(
     let key = (AccountId(account_id), MarketId(market_id));
     let Some(position) = positions_guard.get_mut(&key) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_REPAY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
     };
     let Ok(actual_repaid) = lending_position_repay(position, amount, market.borrow_index) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_REPAY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1082,7 +1117,7 @@ pub(crate) fn lending_repay(
     market.total_borrowed = market.total_borrowed.saturating_sub(actual_repaid);
 
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_REPAY_GAS_COST,
         Bytes::from(u128_in_low_word(actual_repaid)),
         0,
     ))
@@ -1098,7 +1133,7 @@ pub(crate) fn lending_withdraw(
     let zero_out = vec![0u8; 32];
     if input.len() < 160 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1116,7 +1151,7 @@ pub(crate) fn lending_withdraw(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1125,7 +1160,7 @@ pub(crate) fn lending_withdraw(
     let markets_guard = markets.lock().expect("markets mutex poisoned");
     let Some(market) = markets_guard.get(&MarketId(market_id)).cloned() else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1136,7 +1171,7 @@ pub(crate) fn lending_withdraw(
     let key = (AccountId(account_id), MarketId(market_id));
     let Some(existing) = positions_guard.get(&key).cloned() else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1144,7 +1179,7 @@ pub(crate) fn lending_withdraw(
     let mut hypothetical = existing;
     if lending_position_withdraw_collateral(&mut hypothetical, amount).is_err() {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1152,7 +1187,7 @@ pub(crate) fn lending_withdraw(
     let hf = lending_compute_health_factor(&hypothetical, &market, collateral_price, debt_price);
     if hf < LendingIndex::RAY {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_COLLATERAL_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1160,7 +1195,7 @@ pub(crate) fn lending_withdraw(
     positions_guard.insert(key, hypothetical);
 
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_WITHDRAW_COLLATERAL_GAS_COST,
         Bytes::from(u128_in_low_word(1)),
         0,
     ))
@@ -1183,7 +1218,7 @@ pub(crate) fn lending_supply(
     let zero_out = vec![0u8; 32];
     if input.len() < 96 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1199,7 +1234,7 @@ pub(crate) fn lending_supply(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1208,14 +1243,14 @@ pub(crate) fn lending_supply(
     let mut markets_guard = markets.lock().expect("markets mutex poisoned");
     let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
     };
     let Some(new_supplied) = market.total_supplied.checked_add(amount) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1229,7 +1264,7 @@ pub(crate) fn lending_supply(
         .or_insert_with(|| Position::empty(MarketId(market_id)));
     if lending_position_supply(position, amount, supply_index).is_err() {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1238,7 +1273,7 @@ pub(crate) fn lending_supply(
     market.total_supplied = new_supplied;
 
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_SUPPLY_GAS_COST,
         Bytes::from(u128_in_low_word(new_nominal)),
         0,
     ))
@@ -1264,7 +1299,7 @@ pub(crate) fn lending_withdraw_supply(
     let zero_out = vec![0u8; 32];
     if input.len() < 96 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1280,7 +1315,7 @@ pub(crate) fn lending_withdraw_supply(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1289,7 +1324,7 @@ pub(crate) fn lending_withdraw_supply(
     let mut markets_guard = markets.lock().expect("markets mutex poisoned");
     let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1302,7 +1337,7 @@ pub(crate) fn lending_withdraw_supply(
     let key = (AccountId(account_id), MarketId(market_id));
     let Some(position) = positions_guard.get_mut(&key) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1316,7 +1351,7 @@ pub(crate) fn lending_withdraw_supply(
         lending_position_withdraw_supply(&mut hypothetical, amount, supply_index)
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1329,7 +1364,7 @@ pub(crate) fn lending_withdraw_supply(
     let new_total_supplied = total_supplied.saturating_sub(actual_withdrawn);
     if new_total_supplied < total_borrowed {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_WITHDRAW_SUPPLY_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1339,7 +1374,7 @@ pub(crate) fn lending_withdraw_supply(
     market.total_supplied = new_total_supplied;
 
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_WITHDRAW_SUPPLY_GAS_COST,
         Bytes::from(u128_in_low_word(actual_withdrawn)),
         0,
     ))
@@ -1372,7 +1407,7 @@ pub(crate) fn lending_socialize(
 ) -> PrecompileResult {
     let zero_result = || {
         Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_SOCIALIZE_GAS_COST,
             Bytes::from(vec![0u8; 32]),
             0,
         ))
@@ -1466,7 +1501,7 @@ pub(crate) fn lending_socialize(
     );
 
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_SOCIALIZE_GAS_COST,
         Bytes::from(u128_in_low_word(absorbed)),
         0,
     ))
@@ -1482,7 +1517,7 @@ pub(crate) fn lending_liquidate(
     let zero_out = vec![0u8; 32];
     if input.len() < 192 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_LIQUIDATE_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1501,7 +1536,7 @@ pub(crate) fn lending_liquidate(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_LIQUIDATE_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1510,7 +1545,7 @@ pub(crate) fn lending_liquidate(
     let mut markets_guard = markets.lock().expect("markets mutex poisoned");
     let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_LIQUIDATE_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1521,7 +1556,7 @@ pub(crate) fn lending_liquidate(
     let target_key = (AccountId(target_id), MarketId(market_id));
     let Some(target_position) = positions_guard.get(&target_key).cloned() else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_LIQUIDATE_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1537,7 +1572,7 @@ pub(crate) fn lending_liquidate(
     if hf >= LendingIndex::RAY {
         // Healthy → reject
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_LIQUIDATE_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1547,7 +1582,7 @@ pub(crate) fn lending_liquidate(
     let actual_repay = repay_amount.min(nominal_debt);
     if actual_repay == 0 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_LIQUIDATE_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1571,7 +1606,7 @@ pub(crate) fn lending_liquidate(
         .is_err()
     {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_LIQUIDATE_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1582,7 +1617,7 @@ pub(crate) fn lending_liquidate(
     market.total_borrowed = market.total_borrowed.saturating_sub(actual_repay);
 
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_LIQUIDATE_GAS_COST,
         Bytes::from(u128_in_low_word(actual_repay)),
         0,
     ))
@@ -1598,7 +1633,7 @@ pub(crate) fn lending_health(
     let zero_out = vec![0u8; 32];
     if input.len() < 128 {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_HEALTH_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1615,7 +1650,7 @@ pub(crate) fn lending_health(
     let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
     else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_HEALTH_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1624,7 +1659,7 @@ pub(crate) fn lending_health(
     let markets_guard = markets.lock().expect("markets mutex poisoned");
     let Some(market) = markets_guard.get(&MarketId(market_id)) else {
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_HEALTH_GAS_COST,
             Bytes::from(zero_out),
             0,
         ));
@@ -1634,7 +1669,7 @@ pub(crate) fn lending_health(
     let Some(position) = positions_guard.get(&key) else {
         // No position → encode as "infinite health" (matches no-debt semantic)
         return Ok(PrecompileOutput::new(
-            LENDING_BASE_GAS_COST,
+            LENDING_HEALTH_GAS_COST,
             Bytes::from(u256_max_word().to_vec()),
             0,
         ));
@@ -1649,7 +1684,7 @@ pub(crate) fn lending_health(
         u128_in_low_word(hf)
     };
     Ok(PrecompileOutput::new(
-        LENDING_BASE_GAS_COST,
+        LENDING_HEALTH_GAS_COST,
         Bytes::from(out),
         0,
     ))
