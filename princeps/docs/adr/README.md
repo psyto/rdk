@@ -26,6 +26,8 @@ Architectural Decision Records for the Princeps platform. ADR-001 through ADR-00
 | # | Title | Status |
 |---|---|---|
 | [008](./008-pre-token-validator-policy.md) | Pre-token validator policy: permissioned + legally bound until tokenomics ships | Accepted |
+| 009 | _Reserved for tokenomics + on-chain slashing (sunsets ADR-008, ADR-010)_ | Not yet drafted |
+| [010](./010-bad-debt-depletion-policy.md) | Bad-debt depletion policy: algorithmic halt + operator-cap + manual-declaration socialization | Proposed |
 
 ## How to add a new ADR
 
