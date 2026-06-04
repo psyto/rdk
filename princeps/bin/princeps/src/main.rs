@@ -1419,10 +1419,33 @@ async fn run_reth_devnet(
                         height.0, until,
                     );
                 }
+                // Lending depletion guard (threat-model row L-5,
+                // ADR-010 Layer 1): if the insurance fund's running
+                // coverage of recent shortfalls dropped below
+                // threshold, also skip the unified scan + bad-debt
+                // absorption loop. Continuing would write more
+                // bad-debt into a fund that can't cover it; the halt
+                // window is the protocol's "stop digging" signal that
+                // Layer 2 (operator-cap, ADR-008 agreement) and
+                // Layer 3 (manually-declared socialization) are
+                // expected to act in.
+                if let Some(until) = report.lending_halt_tripped_until {
+                    println!(
+                        "  lending depletion guard ARMED at block {}; halted through block {}",
+                        height.0, until,
+                    );
+                }
                 if node.is_oracle_halted(height.0) {
                     if let Some(until) = node.oracle_halt_until() {
                         println!(
                             "  lending scan: skipped (oracle halt active, expires at block {})",
+                            until,
+                        );
+                    }
+                } else if node.is_lending_halted(height.0) {
+                    if let Some(until) = node.lending_halt_until() {
+                        println!(
+                            "  lending scan: skipped (lending halt active, expires at block {})",
                             until,
                         );
                     }

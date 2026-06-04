@@ -61,6 +61,8 @@
 //! keeps each layer independently testable. The `bin/princeps` binary
 //! will own wiring of these two layers together.
 
+use std::collections::VecDeque;
+
 use rdk_funding::{FundingClock, FundingParams, FundingTick, IndexPrice, MarkPrice, Position};
 use rdk_liquidation::{
     execute_adl, AccountSnapshot, AdlReport, InsuranceFund, LiquidationParams,
@@ -128,6 +130,86 @@ impl CircuitBreakerParams {
     }
 }
 
+/// Lending-halt parameters — Layer 1 of ADR-010
+/// (`docs/adr/010-bad-debt-depletion-policy.md`, threat-model row L-5).
+///
+/// The check arms a halt when the insurance fund's balance falls below
+/// a threshold expressed in "running halt-windows of typical shortfall
+/// coverage." The threshold is computed each tick from a rolling
+/// average of recent per-block shortfalls (scan-surfaced + bridge-side
+/// absorbed):
+///
+/// ```text
+/// threshold = recent_avg_shortfall_per_block
+///           * halt_duration_blocks
+///           * depletion_threshold_bps / 10_000
+/// ```
+///
+/// `depletion_threshold_bps == 5_000` (the v0 default) reads as "halt
+/// when the fund can no longer cover 50% of one halt window's worth of
+/// typical shortfall." `0` disables the guard entirely. The window size
+/// (`avg_window_blocks`) controls how many recent blocks contribute to
+/// the running average; larger smooths over bursts, smaller reacts
+/// faster to a building cascade. Real values tune during testnet.
+///
+/// At v0 the halt only short-circuits the coordinator-driven loop in
+/// `bin/princeps` (the unified scan + bridge-side bad-debt absorption).
+/// Precompile-level enforcement (revert on new-borrow during halt) is
+/// v1 work, blocked on the same coordinator-state-from-precompiles work
+/// the oracle circuit breaker is also blocked on. ADR-010 documents the
+/// scope explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LendingHaltParams {
+    /// Lower bound on the insurance fund's balance, expressed in basis
+    /// points of `recent_avg_shortfall_per_block * halt_duration_blocks`.
+    /// `5_000` = 50%; `0` disables the guard (no halt is ever armed).
+    pub depletion_threshold_bps: u32,
+    /// Number of blocks the halt stays armed after firing. Each
+    /// subsequent block that still trips the check re-arms
+    /// `lending_halt_until` to the new maximum, so a sustained
+    /// depletion keeps the halt extended rather than letting it
+    /// expire mid-cascade.
+    pub halt_duration_blocks: u64,
+    /// Number of recent blocks contributing to `recent_avg_shortfall_per_block`.
+    /// A rolling window — older entries fall off as new ones arrive.
+    /// `0` is treated as `1` to avoid divide-by-zero; larger values
+    /// smooth single-block bursts (an isolated large liquidation
+    /// won't trip on its own); smaller values react faster to a
+    /// building cascade.
+    pub avg_window_blocks: u32,
+}
+
+impl LendingHaltParams {
+    /// v0 default per ADR-010:
+    /// - `depletion_threshold_bps = 5_000` — halt at 50% of one halt
+    ///   window's running coverage.
+    /// - `halt_duration_blocks = 200` (≈ 200s at 1s blocks) — long
+    ///   enough for operator-cap (Layer 2) to react.
+    /// - `avg_window_blocks = 128` (~2 min of recent history) — smooth
+    ///   single-block bursts; tune during testnet.
+    #[must_use]
+    pub const fn v0_default() -> Self {
+        Self {
+            depletion_threshold_bps: 5_000,
+            halt_duration_blocks: 200,
+            avg_window_blocks: 128,
+        }
+    }
+
+    /// Disabled — the guard never trips. Useful for unit tests of
+    /// unrelated tick paths and for deployments that opt out of
+    /// algorithmic halt entirely (relying on Layers 2/3 alone — not
+    /// recommended for v1 mainnet but acceptable on internal testnets).
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            depletion_threshold_bps: 0,
+            halt_duration_blocks: 0,
+            avg_window_blocks: 1,
+        }
+    }
+}
+
 /// Static configuration for the node. Set once at chain genesis;
 /// changing values mid-chain would fork the network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +230,10 @@ pub struct PrincepsNodeConfig {
     /// Oracle circuit-breaker thresholds (per-block deviation guard +
     /// halt duration). See [`CircuitBreakerParams`].
     pub circuit_breaker_params: CircuitBreakerParams,
+    /// Lending-halt thresholds (insurance-fund depletion guard +
+    /// halt duration + rolling-average window). See [`LendingHaltParams`]
+    /// and ADR-010.
+    pub lending_halt_params: LendingHaltParams,
     /// When `true`, the tick auto-runs ADL on any
     /// `ScanReport::unfilled_deficit > 0`. When `false`, the bridge
     /// inspects the scan report itself and decides what to do.
@@ -166,6 +252,7 @@ impl PrincepsNodeConfig {
             vault_params: VaultParams::production_default(),
             funding_params: FundingParams::hyperliquid_default(),
             circuit_breaker_params: CircuitBreakerParams::v0_default(),
+            lending_halt_params: LendingHaltParams::v0_default(),
             run_adl_on_unfilled_deficit: true,
         }
     }
@@ -226,6 +313,20 @@ pub struct CoordinatorSnapshot {
     /// `#[serde(default)]` so older snapshots deserialize as `None`.
     #[serde(default)]
     pub oracle_halt_until: Option<u64>,
+    /// Active lending-halt (ADR-010 Layer 1), if any. Restoring this
+    /// keeps a depletion-triggered halt alive across restart —
+    /// otherwise a node restart during an active cascade would
+    /// briefly resume bad-debt absorption before the next tick
+    /// re-armed the halt. `#[serde(default)]` so older snapshots
+    /// deserialize as `None`.
+    ///
+    /// The rolling shortfall window is intentionally NOT persisted;
+    /// on restart it starts empty and re-fills from new ticks. The
+    /// brief gap of "more permissive threshold while window refills"
+    /// is acceptable because the halt itself (the load-bearing
+    /// state) survives.
+    #[serde(default)]
+    pub lending_halt_until: Option<u64>,
 }
 
 /// Per-tick output — aggregated reports plus a snapshot of post-tick
@@ -266,6 +367,18 @@ pub struct TickReport {
     ///
     /// Threat-model row O-3.
     pub circuit_breaker_tripped_until: Option<u64>,
+    /// `Some(until)` if the insurance-fund depletion guard tripped
+    /// this tick — the running coverage threshold dropped below
+    /// `LendingHaltParams::depletion_threshold_bps`. The halt stays
+    /// armed through `block_height ≤ until`; the bin/princeps
+    /// per-block hook skips the unified scan + bridge-side
+    /// bad-debt absorption loop while it's active. Repays,
+    /// liquidations, and withdraws from healthy positions remain
+    /// allowed — they reduce system risk. `None` if no trip
+    /// occurred this tick.
+    ///
+    /// Threat-model row L-5; ADR-010 Layer 1.
+    pub lending_halt_tripped_until: Option<u64>,
 }
 
 /// The integration coordinator. One [`PrincepsNode`] per deployed
@@ -284,6 +397,24 @@ pub struct PrincepsNode {
     /// bad-debt loop in `bin/princeps` consults this via
     /// [`PrincepsNode::is_oracle_halted`].
     oracle_halt_until: Option<u64>,
+    /// `Some(block)` if the lending-halt depletion guard has armed and
+    /// the halt window has not yet elapsed. `None` if it has never
+    /// armed or has fully expired. The bin/princeps per-block hook
+    /// consults this via [`PrincepsNode::is_lending_halted`].
+    /// ADR-010 Layer 1, threat-model row L-5.
+    lending_halt_until: Option<u64>,
+    /// Shortfall observed between the prior tick returning and this
+    /// tick starting — sum of `absorb_lending_bad_debt(amount)` calls
+    /// made by the binary's per-block hook. Folded into the rolling
+    /// window at the next tick's depletion-check step, then reset.
+    /// Not persisted across restart (intentionally — see
+    /// `CoordinatorSnapshot::lending_halt_until` doc).
+    pending_shortfall: u128,
+    /// Rolling window of recent per-block total shortfalls used to
+    /// compute the depletion-threshold denominator. Bounded to
+    /// `LendingHaltParams::avg_window_blocks`; older entries fall off.
+    /// Not persisted across restart — see above.
+    shortfall_window: VecDeque<u128>,
 }
 
 impl PrincepsNode {
@@ -305,6 +436,9 @@ impl PrincepsNode {
             funding_clock,
             last_oracle_refresh_at: None,
             oracle_halt_until: None,
+            lending_halt_until: None,
+            pending_shortfall: 0,
+            shortfall_window: VecDeque::new(),
         }
     }
 
@@ -324,6 +458,9 @@ impl PrincepsNode {
             funding_clock,
             last_oracle_refresh_at: None,
             oracle_halt_until: None,
+            lending_halt_until: None,
+            pending_shortfall: 0,
+            shortfall_window: VecDeque::new(),
         }
     }
 
@@ -378,7 +515,17 @@ impl PrincepsNode {
     /// cross-layer bad-debt routing concern. Bridge-side accumulator that
     /// feeds this per-block tick (instead of a single call per account) is
     /// future work, gated on whether a long-running production loop emerges.
+    ///
+    /// ADR-010 Layer 1: positive shortfalls are also accumulated into
+    /// `pending_shortfall`, which the next [`PrincepsNode::tick`]
+    /// folds into the rolling window before evaluating the depletion
+    /// halt. Non-positive amounts contribute nothing.
     pub fn absorb_lending_bad_debt(&mut self, shortfall: i64) -> WithdrawOutcome {
+        if shortfall > 0 {
+            self.pending_shortfall = self
+                .pending_shortfall
+                .saturating_add(shortfall as u128);
+        }
         self.scanner.fund_mut().withdraw_shortfall(shortfall)
     }
 
@@ -472,6 +619,28 @@ impl PrincepsNode {
         // 4. Vault mark-to-market — no shares move, only NAV.
         self.vault.mark_to_market(input.vault_total_assets);
 
+        // 4b. Lending-halt depletion check (ADR-010 Layer 1).
+        //     Fold this block's total shortfall (post-prior-tick
+        //     absorptions + this-tick scan unfilled) into the rolling
+        //     window, then compare current fund balance against the
+        //     running-coverage threshold. Sits after the scan so the
+        //     fund balance reflects in-tick withdrawals. Report only
+        //     surfaces a trip when the halt's expiry advances (newly
+        //     armed OR extended further) — sustained depletion in an
+        //     already-armed window does not re-surface a trip event.
+        let block_shortfall = self
+            .pending_shortfall
+            .saturating_add(scan.unfilled_deficit.max(0) as u128);
+        self.pending_shortfall = 0;
+        let halt_before = self.lending_halt_until;
+        self.evaluate_lending_halt(block_shortfall, input.block_height);
+        let halt_after = self.lending_halt_until;
+        let lending_halt_tripped_until = match (halt_before, halt_after) {
+            (None, Some(until)) => Some(until),
+            (Some(prev), Some(now)) if now > prev => Some(now),
+            _ => None,
+        };
+
         // 5. Funding tick — only if the oracle has a cached current
         //    price AND the funding interval has elapsed. The clock's
         //    own gating decides whether a settlement actually fires;
@@ -505,6 +674,7 @@ impl PrincepsNode {
             } else {
                 None
             },
+            lending_halt_tripped_until,
         }
     }
 
@@ -524,6 +694,80 @@ impl PrincepsNode {
     #[must_use]
     pub const fn oracle_halt_until(&self) -> Option<u64> {
         self.oracle_halt_until
+    }
+
+    /// Returns `true` if the lending-halt depletion guard is currently
+    /// armed — i.e., it tripped at some prior tick and `block_height`
+    /// is still within the halt window. The bin/princeps per-block
+    /// hook consults this before running the unified scan + bridge-side
+    /// bad-debt absorption loop (ADR-010 Layer 1, threat-model row L-5).
+    #[must_use]
+    pub fn is_lending_halted(&self, block_height: u64) -> bool {
+        self.lending_halt_until
+            .is_some_and(|until| block_height <= until)
+    }
+
+    /// Block height at which the current lending halt expires, if any.
+    /// Useful for telemetry / RPC. Returns `None` when no halt is armed.
+    #[must_use]
+    pub const fn lending_halt_until(&self) -> Option<u64> {
+        self.lending_halt_until
+    }
+
+    /// Internal: push this block's total shortfall into the rolling
+    /// window, recompute the running-coverage threshold, and arm
+    /// `lending_halt_until` if the current insurance-fund balance is
+    /// below it. Returns whether the guard tripped on this tick.
+    ///
+    /// Returns `false` (no trip) when:
+    /// - the guard is disabled (`depletion_threshold_bps == 0`)
+    /// - the window's running average is zero (no recent shortfalls)
+    /// - the fund balance is at or above the computed threshold
+    ///
+    /// The window itself is updated unconditionally so a future enable
+    /// (config tunable at deploy) sees an already-populated history.
+    fn evaluate_lending_halt(&mut self, block_shortfall: u128, block_height: u64) -> bool {
+        let params = self.config.lending_halt_params;
+        // Window size of 0 is nonsensical; treat as 1 to avoid div-by-zero.
+        let window_size = params.avg_window_blocks.max(1) as usize;
+        while self.shortfall_window.len() >= window_size {
+            self.shortfall_window.pop_front();
+        }
+        self.shortfall_window.push_back(block_shortfall);
+
+        if params.depletion_threshold_bps == 0 {
+            return false;
+        }
+
+        let len = self.shortfall_window.len() as u128;
+        let sum: u128 = self.shortfall_window.iter().sum();
+        if sum == 0 {
+            // No recent shortfall observed: nothing to halt against.
+            return false;
+        }
+        let avg = sum / len;
+        // threshold = avg * halt_duration_blocks * depletion_threshold_bps / 10_000
+        // u128 throughout; saturate on overflow (pathological inputs).
+        let threshold = avg
+            .saturating_mul(u128::from(params.halt_duration_blocks))
+            .saturating_mul(u128::from(params.depletion_threshold_bps))
+            / 10_000;
+
+        let fund_balance = self.scanner.fund_balance();
+        let fund_balance_u128 = if fund_balance < 0 {
+            0
+        } else {
+            fund_balance as u128
+        };
+        if fund_balance_u128 >= threshold {
+            return false;
+        }
+        let new_until = block_height.saturating_add(params.halt_duration_blocks);
+        self.lending_halt_until = Some(match self.lending_halt_until {
+            Some(existing) => existing.max(new_until),
+            None => new_until,
+        });
+        true
     }
 
     /// Internal: evaluate this tick's deviation between `prior_index`
@@ -594,6 +838,7 @@ impl PrincepsNode {
             funding_last_settled_at: self.funding_clock.last_settled_at(),
             cached_oracle_price: self.oracle.current(),
             oracle_halt_until: self.oracle_halt_until,
+            lending_halt_until: self.lending_halt_until,
         }
     }
 
@@ -618,6 +863,14 @@ impl PrincepsNode {
         );
         self.last_oracle_refresh_at = snap.last_oracle_refresh_at;
         self.oracle_halt_until = snap.oracle_halt_until;
+        self.lending_halt_until = snap.lending_halt_until;
+        // Rolling window + pending shortfall are intentionally NOT
+        // persisted (see CoordinatorSnapshot::lending_halt_until doc).
+        // Re-initialize both so a re-loaded node starts from empty
+        // observation history; the halt itself survives via the field
+        // above.
+        self.pending_shortfall = 0;
+        self.shortfall_window.clear();
         if let Some(price) = snap.cached_oracle_price {
             self.oracle.restore_current(price);
         }
@@ -1093,5 +1346,298 @@ mod tests {
         assert!(fresh.is_oracle_halted(1_000));
         assert!(fresh.is_oracle_halted(1_050));
         assert!(!fresh.is_oracle_halted(1_051));
+    }
+
+    // ─── lending halt: depletion guard (ADR-010 Layer 1) ───────────
+
+    /// Build a node with a known insurance-fund balance and the v0
+    /// lending-halt defaults. Used by the depletion-guard tests.
+    fn node_with_fund(balance: i64) -> PrincepsNode {
+        PrincepsNode::with_insurance_fund(
+            PrincepsNodeConfig::hyperliquid_default(),
+            InsuranceFund::new(balance),
+        )
+    }
+
+    #[test]
+    fn lending_halt_disabled_never_arms() {
+        let mut node = node_with_fund(0);
+        node.config.lending_halt_params = LendingHaltParams::disabled();
+        // A huge shortfall against an empty fund would normally trip
+        // the guard immediately.
+        let tripped = node.evaluate_lending_halt(1_000_000, 100);
+        assert!(!tripped);
+        assert_eq!(node.lending_halt_until, None);
+        assert!(!node.is_lending_halted(100));
+    }
+
+    #[test]
+    fn lending_halt_zero_avg_does_not_arm() {
+        // Fund is empty, but no shortfall has ever been observed —
+        // recent_avg == 0 → threshold == 0 → no halt.
+        let mut node = node_with_fund(0);
+        let tripped = node.evaluate_lending_halt(0, 100);
+        assert!(!tripped);
+        assert_eq!(node.lending_halt_until, None);
+    }
+
+    #[test]
+    fn lending_halt_with_ample_capacity_does_not_arm() {
+        // v0_default: 5000 bps, 200 halt_duration, 128 window.
+        // Single observation of shortfall=100 → avg=100, threshold =
+        // 100 * 200 * 5000 / 10_000 = 10_000. Fund of 50_000 ≫ threshold.
+        let mut node = node_with_fund(50_000);
+        let tripped = node.evaluate_lending_halt(100, 100);
+        assert!(!tripped);
+        assert_eq!(node.lending_halt_until, None);
+    }
+
+    #[test]
+    fn lending_halt_arms_when_fund_below_threshold() {
+        // Same arithmetic: shortfall=100 → threshold=10_000.
+        // Fund=5_000 < threshold → arm.
+        let mut node = node_with_fund(5_000);
+        let tripped = node.evaluate_lending_halt(100, 1_000);
+        assert!(tripped);
+        let expected_until =
+            1_000 + LendingHaltParams::v0_default().halt_duration_blocks;
+        assert_eq!(node.lending_halt_until, Some(expected_until));
+        assert!(node.is_lending_halted(1_000));
+        assert!(node.is_lending_halted(expected_until));
+        assert!(!node.is_lending_halted(expected_until + 1));
+    }
+
+    #[test]
+    fn lending_halt_sustained_depletion_extends_window() {
+        // First trip at block 1_000; sustained shortfall at 1_010
+        // re-arms to the later expiry rather than letting the first
+        // window expire mid-cascade.
+        let mut node = node_with_fund(0);
+        assert!(node.evaluate_lending_halt(100, 1_000));
+        let first = node.lending_halt_until.expect("first arm");
+        assert!(node.evaluate_lending_halt(100, 1_010));
+        let second = node.lending_halt_until.expect("second arm");
+        assert!(second > first);
+    }
+
+    #[test]
+    fn lending_halt_rolling_window_drops_burst_after_window_size_zeros() {
+        // Window size = 4. Burst, then enough zeros to roll the
+        // burst out. The burst itself trips while it's in-window
+        // (expected — that's the guard doing its job). The
+        // *smoothing* claim is: once the burst rolls out, the avg
+        // drops to zero and the guard stops re-arming on
+        // subsequent zero blocks.
+        let mut node = node_with_fund(10_000);
+        node.config.lending_halt_params = LendingHaltParams {
+            depletion_threshold_bps: 5_000,
+            halt_duration_blocks: 200,
+            avg_window_blocks: 4,
+        };
+        // Burst at block 0; window=[1M]; avg=1M; trips.
+        let _ = node.evaluate_lending_halt(1_000_000, 0);
+        assert!(node.is_lending_halted(0));
+        // Blocks 1..=4: each block the burst is still somewhere in
+        // the window, so avg > 0, threshold ≫ fund, halt extends.
+        // After block 4 (the burst is at index 0 of a 4-element
+        // window with three trailing zeros), it pops out on
+        // block 5.
+        for h in 1..=4 {
+            let _ = node.evaluate_lending_halt(0, h);
+        }
+        // Block 5: window pops the burst, all zeros remain.
+        let tripped_at_5 = node.evaluate_lending_halt(0, 5);
+        assert!(!tripped_at_5, "burst rolled out, avg=0, no trip");
+        // Block 6, 7: same — avg stays 0, no new arm.
+        assert!(!node.evaluate_lending_halt(0, 6));
+        assert!(!node.evaluate_lending_halt(0, 7));
+    }
+
+    #[test]
+    fn lending_halt_persists_across_snapshot_round_trip() {
+        let mut node = node_with_fund(0);
+        // Arm the halt.
+        assert!(node.evaluate_lending_halt(100, 1_000));
+        let expected_until =
+            1_000 + LendingHaltParams::v0_default().halt_duration_blocks;
+        let snap = node.snapshot();
+        assert_eq!(snap.lending_halt_until, Some(expected_until));
+
+        // Round-trip via serde JSON, mirroring the real on-disk path.
+        let bytes = serde_json::to_vec(&snap).expect("serialize");
+        let decoded: CoordinatorSnapshot =
+            serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded.lending_halt_until, Some(expected_until));
+
+        // Fresh node has no halt; loading the decoded snapshot
+        // restores it across the would-be restart boundary.
+        let mut fresh = default_node();
+        assert!(!fresh.is_lending_halted(1_000));
+        fresh.load_snapshot(decoded);
+        assert!(fresh.is_lending_halted(1_000));
+        assert!(fresh.is_lending_halted(expected_until));
+        assert!(!fresh.is_lending_halted(expected_until + 1));
+        // Rolling window + pending are intentionally not persisted.
+        assert!(fresh.shortfall_window.is_empty());
+        assert_eq!(fresh.pending_shortfall, 0);
+    }
+
+    #[test]
+    fn coordinator_snapshot_lending_halt_field_is_serde_default_for_old_snapshots() {
+        // Old on-disk snapshots predate ADR-010 and lack the
+        // `lending_halt_until` field entirely. serde(default) should
+        // make them decode with `None`.
+        let json = r#"{
+            "insurance_fund_balance": 500,
+            "vault_total_shares": 0,
+            "vault_total_assets": 0,
+            "last_oracle_refresh_at": null,
+            "funding_last_settled_at": 0
+        }"#;
+        let decoded: CoordinatorSnapshot =
+            serde_json::from_str(json).expect("legacy snapshot decodes");
+        assert_eq!(decoded.lending_halt_until, None);
+        assert_eq!(decoded.oracle_halt_until, None);
+        assert_eq!(decoded.cached_oracle_price, None);
+        assert_eq!(decoded.insurance_fund_balance, 500);
+    }
+
+    #[test]
+    fn absorb_lending_bad_debt_accumulates_pending_shortfall() {
+        let mut node = PrincepsNode::with_insurance_fund(
+            PrincepsNodeConfig::hyperliquid_default(),
+            InsuranceFund::new(1_000),
+        );
+        assert_eq!(node.pending_shortfall, 0);
+        node.absorb_lending_bad_debt(300);
+        node.absorb_lending_bad_debt(200);
+        assert_eq!(node.pending_shortfall, 500);
+        // Negative / zero shortfalls don't pollute the accumulator.
+        node.absorb_lending_bad_debt(0);
+        node.absorb_lending_bad_debt(-50);
+        assert_eq!(node.pending_shortfall, 500);
+    }
+
+    #[test]
+    fn tick_folds_pending_and_scan_unfilled_into_window_then_clears_pending() {
+        // No accounts → scan.unfilled_deficit=0. Pre-populate
+        // pending_shortfall from "prior tick's bad-debt absorptions".
+        let mut node = node_with_fund(1_000_000_000);
+        node.absorb_lending_bad_debt(777);
+        assert_eq!(node.pending_shortfall, 777);
+        let _ = node.tick(TickInput {
+            block_height: 1,
+            block_time: 100,
+            mark: MarkPrice(100),
+            account_snapshots: &[],
+            vault_total_assets: 0,
+        });
+        // Tick should have folded 777 into the window and reset pending.
+        assert_eq!(node.pending_shortfall, 0);
+        assert_eq!(node.shortfall_window.back().copied(), Some(777));
+    }
+
+    #[test]
+    fn tick_surfaces_lending_halt_tripped_until_in_report() {
+        // Fund=0, generous prior shortfall → trip on first tick.
+        let mut node = node_with_fund(0);
+        node.absorb_lending_bad_debt(10_000);
+        let report = node.tick(TickInput {
+            block_height: 500,
+            block_time: 100,
+            mark: MarkPrice(100),
+            account_snapshots: &[],
+            vault_total_assets: 0,
+        });
+        assert!(report.lending_halt_tripped_until.is_some());
+        let expected_until =
+            500 + LendingHaltParams::v0_default().halt_duration_blocks;
+        assert_eq!(report.lending_halt_tripped_until, Some(expected_until));
+        assert!(node.is_lending_halted(500));
+    }
+
+    #[test]
+    fn tick_surfaces_sustained_depletion_as_each_tick_extends_halt() {
+        // Sustained depletion (fund stays below threshold every
+        // tick) continuously extends the halt expiry, so every tick
+        // surfaces `lending_halt_tripped_until` — telemetry sees the
+        // halt being kept alive rather than a single one-shot arm.
+        let mut node = node_with_fund(0);
+        node.absorb_lending_bad_debt(10_000);
+        let r1 = node.tick(TickInput {
+            block_height: 500,
+            block_time: 100,
+            mark: MarkPrice(100),
+            account_snapshots: &[],
+            vault_total_assets: 0,
+        });
+        let r2 = node.tick(TickInput {
+            block_height: 501,
+            block_time: 101,
+            mark: MarkPrice(100),
+            account_snapshots: &[],
+            vault_total_assets: 0,
+        });
+        let until1 = r1.lending_halt_tripped_until.expect("r1 arms");
+        let until2 = r2.lending_halt_tripped_until.expect("r2 extends");
+        assert!(until2 > until1, "sustained depletion should extend expiry");
+    }
+
+    #[test]
+    fn tick_does_not_re_surface_halt_when_already_at_max_expiry_within_window() {
+        // A tick that re-evaluates the halt at a height where the
+        // existing expiry already covers (block + halt_duration) —
+        // i.e., evaluate_lending_halt computed new_until ≤ existing
+        // — should NOT surface a new trip in TickReport.
+        let mut node = node_with_fund(0);
+        // Manually arm to a far-future expiry — this simulates a
+        // recently-armed halt with a long horizon.
+        node.lending_halt_until = Some(10_000);
+        node.absorb_lending_bad_debt(10_000);
+        let report = node.tick(TickInput {
+            block_height: 100, // 100 + 200 = 300, well below 10_000
+            block_time: 100,
+            mark: MarkPrice(100),
+            account_snapshots: &[],
+            vault_total_assets: 0,
+        });
+        // Existing expiry was already 10_000; new computation gives
+        // max(10_000, 300) = 10_000. No advance → no surfaced trip.
+        assert_eq!(report.lending_halt_tripped_until, None);
+        // But the underlying halt is still armed.
+        assert!(node.is_lending_halted(100));
+        assert_eq!(node.lending_halt_until, Some(10_000));
+    }
+
+    #[test]
+    fn lending_halt_eventually_expires_after_burst_rolls_out_and_window_clears() {
+        // Arm with a single shortfall, then run enough zero-shortfall
+        // blocks for (a) the burst to roll out of the window and (b)
+        // the last re-extended halt expiry to also elapse. With a
+        // positive fund balance and zero avg, the guard stops
+        // re-arming and `is_lending_halted` returns false past the
+        // last extended expiry.
+        let mut node = node_with_fund(1);
+        node.config.lending_halt_params = LendingHaltParams {
+            depletion_threshold_bps: 5_000,
+            halt_duration_blocks: 5, // short for testability
+            avg_window_blocks: 3,
+        };
+        // Burst at block 100. window=[100], avg=100, threshold=250,
+        // fund=1<250 → arm until 105.
+        let _ = node.evaluate_lending_halt(100, 100);
+        // Blocks 101, 102: burst still in window; sustained shortage
+        // re-extends halt past the original 105. Block 102 is the
+        // last block where the window still contains the burst
+        // (window pops the 100 at block 103 when len reaches 3 and a
+        // new push comes in).
+        let _ = node.evaluate_lending_halt(0, 101); // arms to max(105, 106) = 106
+        let _ = node.evaluate_lending_halt(0, 102); // arms to max(106, 107) = 107
+        // Block 103: window=[0,0,0] after pop, avg=0, no arm. Halt
+        // stays at 107.
+        let _ = node.evaluate_lending_halt(0, 103);
+        assert!(node.is_lending_halted(107), "still within last extended halt");
+        // Past 107: halt has expired and no new arm has fired.
+        assert!(!node.is_lending_halted(108));
     }
 }
