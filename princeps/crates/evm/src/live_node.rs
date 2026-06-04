@@ -40,7 +40,9 @@ use rdk_clob::{AccountId, Book, Fill, FillResult, Order};
 use princeps_consensus::bridge::{BridgeError, ConsensusBridge};
 use rdk_funding::{MarkPrice, Notional, PositionSize};
 use princeps_lending::{
-    accrue_interest, compute_health_factor, deposit_collateral, repay, withdraw_collateral,
+    accrue_interest, compute_health_factor, deposit_collateral, repay,
+    supply as lending_position_supply, withdraw_collateral,
+    withdraw_supply as lending_position_withdraw_supply,
     Index as LendingIndex, InterestAccrualReport, LendingError, Market, MarketId, Position,
 };
 use princeps_portfolio::{
@@ -617,6 +619,85 @@ impl<P> LiveRethEvmBridge<P> {
         // total_borrowed decreases by the nominal amount that was actually repaid.
         market.total_borrowed = market.total_borrowed.saturating_sub(actual_repaid);
         Ok(actual_repaid)
+    }
+
+    /// Supply `amount` of underlying into `(account, market_id)` (v1
+    /// supplier-side foundation; companion to the precompile at
+    /// `0x...0c25`). Mirror of [`lending_deposit_collateral`] on the
+    /// supplier side. Grows the caller's `scaled_supply` at the
+    /// current `market.supply_index` and increments
+    /// `market.total_supplied`. No health check — adding supply can
+    /// only improve market utilization.
+    pub fn lending_supply(
+        &self,
+        account: AccountId,
+        market_id: MarketId,
+        amount: u128,
+    ) -> Result<u128, LendingBridgeError> {
+        let mut markets = self.markets.lock().expect("markets mutex poisoned");
+        let market = markets
+            .get_mut(&market_id)
+            .ok_or(LendingBridgeError::UnknownMarket)?;
+        let supply_index = market.supply_index;
+        // Overflow-guard the market total.
+        let new_total = market
+            .total_supplied
+            .checked_add(amount)
+            .ok_or(LendingBridgeError::Lending(LendingError::AmountTooLarge))?;
+
+        let mut positions = self.positions.lock().expect("positions mutex poisoned");
+        let position = positions
+            .entry((account, market_id))
+            .or_insert_with(|| Position::empty(market_id));
+        lending_position_supply(position, amount, supply_index)?;
+        let new_nominal = position.nominal_supply(supply_index);
+        market.total_supplied = new_total;
+        Ok(new_nominal)
+    }
+
+    /// Withdraw up to `amount` of nominal supply from `(account,
+    /// market_id)` (v1 supplier-side foundation; companion to the
+    /// precompile at `0x...0c26`). Caps at the caller's current
+    /// nominal_supply (no over-withdraw). Rejected if the post-withdraw
+    /// `total_supplied` would fall below `total_borrowed` — that
+    /// would push utilization above 100% and oversubscribe
+    /// borrowers, the supplier-side analog to the borrower-side
+    /// health-factor check.
+    ///
+    /// Returns the actual amount withdrawn (≤ `amount`).
+    pub fn lending_withdraw_supply(
+        &self,
+        account: AccountId,
+        market_id: MarketId,
+        amount: u128,
+    ) -> Result<u128, LendingBridgeError> {
+        let mut markets = self.markets.lock().expect("markets mutex poisoned");
+        let market = markets
+            .get_mut(&market_id)
+            .ok_or(LendingBridgeError::UnknownMarket)?;
+        let supply_index = market.supply_index;
+        let total_borrowed = market.total_borrowed;
+        let total_supplied = market.total_supplied;
+
+        let mut positions = self.positions.lock().expect("positions mutex poisoned");
+        let Some(existing) = positions.get(&(account, market_id)) else {
+            return Err(LendingBridgeError::Lending(
+                LendingError::NoOutstandingSupply,
+            ));
+        };
+
+        // Simulate, gate, then commit. Same hypothetical-mutate-then-commit
+        // shape as `lending_withdraw_collateral`.
+        let mut hypothetical = existing.clone();
+        let actual_withdrawn =
+            lending_position_withdraw_supply(&mut hypothetical, amount, supply_index)?;
+        let new_total_supplied = total_supplied.saturating_sub(actual_withdrawn);
+        if new_total_supplied < total_borrowed {
+            return Err(LendingBridgeError::PostOperationUnhealthy);
+        }
+        positions.insert((account, market_id), hypothetical);
+        market.total_supplied = new_total_supplied;
+        Ok(actual_withdrawn)
     }
 
     /// Unified per-block scan: iterate every account that has either a

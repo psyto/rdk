@@ -366,6 +366,24 @@ enum LendingCommand {
         #[arg(long)]
         state_file: Option<PathBuf>,
     },
+    /// Supply underlying into the market (b1b5981 supplier-side foundation).
+    /// Mirror of [`Deposit`] on the supplier side.
+    Supply {
+        account: u64,
+        amount: u128,
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+    },
+    /// Withdraw nominal supply from the market. Caps at the supplier's
+    /// current nominal_supply; rejected if the post-withdraw
+    /// `total_supplied` would fall below `total_borrowed` (utilization
+    /// safety gate; mirrors the EVM precompile at 0x...0c26).
+    WithdrawSupply {
+        account: u64,
+        amount: u128,
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+    },
 }
 
 /// On-disk shape of `--validators <path>`. Stage 13j.
@@ -704,6 +722,8 @@ fn run_lending_subcommand(cmd: LendingCommand) -> eyre::Result<()> {
         | LendingCommand::Withdraw { state_file, .. }
         | LendingCommand::Health { state_file, .. }
         | LendingCommand::Scan { state_file, .. }
+        | LendingCommand::Supply { state_file, .. }
+        | LendingCommand::WithdrawSupply { state_file, .. }
         | LendingCommand::List { state_file } => resolve_lending_state_path(state_file.as_ref())?,
     };
 
@@ -795,6 +815,28 @@ fn run_lending_subcommand(cmd: LendingCommand) -> eyre::Result<()> {
         LendingCommand::List { .. } => {
             should_save = false;
             print_position_list(&bridge);
+        }
+        LendingCommand::Supply { account, amount, .. } => {
+            let new_nominal = bridge
+                .lending_supply(AccountId(account), MarketId(0), amount)
+                .map_err(|e| eyre::eyre!("supply failed: {e:?}"))?;
+            println!(
+                "Supplied {} units; account {}'s nominal_supply is now {}.",
+                amount, account, new_nominal,
+            );
+            print_account_state(&bridge, account, "supply");
+        }
+        LendingCommand::WithdrawSupply {
+            account, amount, ..
+        } => {
+            let withdrawn = bridge
+                .lending_withdraw_supply(AccountId(account), MarketId(0), amount)
+                .map_err(|e| eyre::eyre!("withdraw-supply failed: {e:?}"))?;
+            println!(
+                "Withdrew {} units (requested {}). Account {} updated.",
+                withdrawn, amount, account,
+            );
+            print_account_state(&bridge, account, "withdraw-supply");
         }
     }
 
