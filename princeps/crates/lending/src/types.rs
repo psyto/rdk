@@ -91,15 +91,27 @@ pub struct Market {
 
 /// Per-account position in a specific market.
 ///
-/// Index-based accounting: `scaled_debt × borrow_index ÷ RAY = nominal debt`.
+/// Index-based accounting on both sides:
+/// - `scaled_debt × borrow_index ÷ RAY = nominal debt` (borrower side).
+/// - `scaled_supply × supply_index ÷ RAY = nominal supply` (supplier side, v1+).
+///
 /// When a user borrows N units at index I, scaled_debt is incremented by
 /// `N × RAY ÷ I`. When index later grows to I', the nominal debt is
 /// `scaled_debt × I' ÷ RAY` — interest has accrued without touching the position.
+/// Supplier mechanics are symmetric.
+///
+/// `scaled_supply` was added in the v1 multi-asset / supplier accounting work
+/// (post-`accrual.rs` "v0 supply side parked" note). v0 snapshots predate
+/// this field and decode with `scaled_supply == 0` via `#[serde(default)]`;
+/// the bridge-owned implicit pool continues to provide initial liquidity
+/// alongside any per-depositor scaled_supply positions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Position {
     pub market_id: MarketId,
     pub collateral_amount: u128,
     pub scaled_debt: u128,
+    #[serde(default)]
+    pub scaled_supply: u128,
 }
 
 impl Market {
@@ -153,10 +165,15 @@ impl Market {
 }
 
 impl Position {
-    /// Empty position in a market (no collateral, no debt).
+    /// Empty position in a market (no collateral, no debt, no supply).
     #[must_use]
     pub fn empty(market_id: MarketId) -> Self {
-        Position { market_id, collateral_amount: 0, scaled_debt: 0 }
+        Position {
+            market_id,
+            collateral_amount: 0,
+            scaled_debt: 0,
+            scaled_supply: 0,
+        }
     }
 
     /// Nominal debt at the given borrow_index: `scaled_debt × borrow_index ÷ RAY`.
@@ -167,6 +184,18 @@ impl Position {
             return 0;
         }
         let product = self.scaled_debt.saturating_mul(borrow_index.0);
+        product / Index::RAY
+    }
+
+    /// Nominal supply at the given supply_index: `scaled_supply × supply_index ÷ RAY`.
+    /// Returns 0 if scaled_supply is 0. Mirrors [`Position::nominal_debt`] for
+    /// the supplier side.
+    #[must_use]
+    pub fn nominal_supply(&self, supply_index: Index) -> u128 {
+        if self.scaled_supply == 0 {
+            return 0;
+        }
+        let product = self.scaled_supply.saturating_mul(supply_index.0);
         product / Index::RAY
     }
 }
@@ -239,22 +268,76 @@ mod tests {
         let p = Position::empty(MarketId(0));
         assert_eq!(p.collateral_amount, 0);
         assert_eq!(p.scaled_debt, 0);
+        assert_eq!(p.scaled_supply, 0);
         assert_eq!(p.nominal_debt(Index::ONE), 0);
+        assert_eq!(p.nominal_supply(Index::ONE), 0);
     }
 
     #[test]
     fn nominal_debt_at_unit_index_equals_scaled() {
-        let p = Position { market_id: MarketId(0), collateral_amount: 0, scaled_debt: 100 };
+        let p = Position {
+            market_id: MarketId(0),
+            collateral_amount: 0,
+            scaled_debt: 100,
+            scaled_supply: 0,
+        };
         assert_eq!(p.nominal_debt(Index::ONE), 100);
     }
 
     #[test]
     fn nominal_debt_scales_linearly_with_index() {
-        let p = Position { market_id: MarketId(0), collateral_amount: 0, scaled_debt: 100 };
+        let p = Position {
+            market_id: MarketId(0),
+            collateral_amount: 0,
+            scaled_debt: 100,
+            scaled_supply: 0,
+        };
         let two_x = Index(Index::RAY * 2);
         assert_eq!(p.nominal_debt(two_x), 200);
         let half_x = Index(Index::RAY / 2);
         assert_eq!(p.nominal_debt(half_x), 50);
+    }
+
+    #[test]
+    fn nominal_supply_at_unit_index_equals_scaled() {
+        let p = Position {
+            market_id: MarketId(0),
+            collateral_amount: 0,
+            scaled_debt: 0,
+            scaled_supply: 100,
+        };
+        assert_eq!(p.nominal_supply(Index::ONE), 100);
+    }
+
+    #[test]
+    fn nominal_supply_scales_linearly_with_index() {
+        let p = Position {
+            market_id: MarketId(0),
+            collateral_amount: 0,
+            scaled_debt: 0,
+            scaled_supply: 100,
+        };
+        let two_x = Index(Index::RAY * 2);
+        assert_eq!(p.nominal_supply(two_x), 200);
+        let half_x = Index(Index::RAY / 2);
+        assert_eq!(p.nominal_supply(half_x), 50);
+    }
+
+    #[test]
+    fn old_serialized_position_decodes_with_serde_default_scaled_supply() {
+        // v0 snapshots predate scaled_supply. #[serde(default)] should
+        // fill in `0` so cross-version restores don't break.
+        let json = r#"{
+            "market_id": 0,
+            "collateral_amount": 5000,
+            "scaled_debt": 1234
+        }"#;
+        let decoded: Position =
+            serde_json::from_str(json).expect("legacy position decodes");
+        assert_eq!(decoded.market_id, MarketId(0));
+        assert_eq!(decoded.collateral_amount, 5000);
+        assert_eq!(decoded.scaled_debt, 1234);
+        assert_eq!(decoded.scaled_supply, 0);
     }
 
     #[test]

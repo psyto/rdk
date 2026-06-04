@@ -12,17 +12,23 @@
 //! per-position interest math — `position.nominal_debt(market.borrow_index)`
 //! automatically reflects the new debt.
 //!
-//! ## v0 scope: supply side parked
+//! ## Supply-side accrual (v1 multi-asset / `scaled_supply` work)
 //!
-//! v0 ships **without** supplier-side `supply_index` accounting. The pre-funded
-//! lending pool is bridge-owned and accrues interest into `reserves` (insurance
-//! fund). Aave-style supplier aTokens with separate supply rate accrual
-//! lands in a later stage (19f or v1 multi-asset).
+//! Each accrual call also grows `supply_index` per the Aave standard:
 //!
-//! Rationale: demonstrate lending + liquidation mechanics cleanly for v0
-//! without complicating Position struct with `scaled_supply` field. Real
-//! suppliers come in v1+ when we extend to multi-asset markets and need
-//! third-party liquidity provision.
+//! ```text
+//! supply_rate = borrow_rate × utilization × (1 - reserve_factor)
+//! ```
+//!
+//! and grows `total_supplied` by the supplier-cut portion of accrued
+//! interest (`interest_accrued − reserve_cut`). The supplier side is
+//! "additive only" at v0: the bridge-owned pool continues to provide
+//! initial liquidity via `total_supplied`, and new per-depositor positions
+//! using `scaled_supply` are layered on top. The invariant
+//! `sum(position.nominal_supply(supply_index)) ≤ total_supplied` holds
+//! at v0, with the gap being the bridge's implicit pool. No bridge
+//! migration in this commit — see ADR-010 Layer 3 deferral note for
+//! the wider scope of supplier-side work still pending.
 //!
 //! ## Linear interest approximation
 //!
@@ -42,18 +48,27 @@ pub struct InterestAccrualReport {
     pub new_borrow_index: Index,
     pub interest_accrued: u128,
     pub reserves_added: u128,
+    /// Supply-side index after this accrual. Mirrors `new_borrow_index`
+    /// for the supplier path (v1 multi-asset / `scaled_supply` work).
+    pub new_supply_index: Index,
+    /// Supplier-cut interest added to `total_supplied` this accrual
+    /// (`interest_accrued − reserves_added`). This is the share of
+    /// interest that flows to depositors via `supply_index` growth.
+    pub supply_accrued: u128,
 }
 
 impl InterestAccrualReport {
     /// A no-op report (no blocks elapsed, or nothing borrowed).
     #[must_use]
-    pub fn no_change(borrow_index: Index) -> Self {
+    pub fn no_change(borrow_index: Index, supply_index: Index) -> Self {
         Self {
             blocks_elapsed: 0,
             borrow_rate_per_block: 0,
             new_borrow_index: borrow_index,
             interest_accrued: 0,
             reserves_added: 0,
+            new_supply_index: supply_index,
+            supply_accrued: 0,
         }
     }
 }
@@ -62,7 +77,7 @@ impl InterestAccrualReport {
 /// with the same `current_block` as `market.last_accrual_block` is a no-op.
 pub fn accrue_interest(market: &mut Market, current_block: u64) -> InterestAccrualReport {
     if current_block <= market.last_accrual_block {
-        return InterestAccrualReport::no_change(market.borrow_index);
+        return InterestAccrualReport::no_change(market.borrow_index, market.supply_index);
     }
     let blocks_elapsed = current_block - market.last_accrual_block;
 
@@ -70,7 +85,7 @@ pub fn accrue_interest(market: &mut Market, current_block: u64) -> InterestAccru
     // accruals don't claim phantom blocks.
     if market.total_borrowed == 0 {
         market.last_accrual_block = current_block;
-        return InterestAccrualReport::no_change(market.borrow_index);
+        return InterestAccrualReport::no_change(market.borrow_index, market.supply_index);
     }
 
     let utilization = market.utilization_bps();
@@ -90,9 +105,34 @@ pub fn accrue_interest(market: &mut Market, current_block: u64) -> InterestAccru
     let reserve_cut =
         interest_accrued.saturating_mul(u128::from(market.reserve_factor.0)) / 10_000;
 
+    // Supplier cut = interest − reserves cut. This is what suppliers earn.
+    let supply_accrued = interest_accrued.saturating_sub(reserve_cut);
+
+    // supply_index_growth = current_supply_index × (supply_accrued / total_supplied).
+    // Equivalently in Aave form: supply_rate = borrow_rate × utilization
+    //   × (1 − reserve_factor); we derive it from observed quantities to
+    // stay arithmetically consistent with the borrow-side computation
+    // even under boundary cases (zero supply, large reserve factor).
+    let supply_index_growth = if market.total_supplied == 0 {
+        // No depositors at all (not even the bridge's implicit pool) →
+        // supply_index can't grow because there's nothing to scale
+        // against. supply_accrued is still credited into total_supplied
+        // below; future depositors then start fresh at the unit index.
+        0
+    } else {
+        market
+            .supply_index
+            .0
+            .saturating_mul(supply_accrued)
+            / market.total_supplied
+    };
+    let new_supply_index = market.supply_index.0.saturating_add(supply_index_growth);
+
     // Apply
     market.borrow_index = Index(new_borrow_index);
+    market.supply_index = Index(new_supply_index);
     market.total_borrowed = market.total_borrowed.saturating_add(interest_accrued);
+    market.total_supplied = market.total_supplied.saturating_add(supply_accrued);
     market.reserves = market.reserves.saturating_add(reserve_cut);
     market.last_accrual_block = current_block;
 
@@ -102,6 +142,8 @@ pub fn accrue_interest(market: &mut Market, current_block: u64) -> InterestAccru
         new_borrow_index: market.borrow_index,
         interest_accrued,
         reserves_added: reserve_cut,
+        new_supply_index: market.supply_index,
+        supply_accrued,
     }
 }
 
@@ -257,10 +299,131 @@ mod tests {
 
     #[test]
     fn report_no_change_helper_is_consistent() {
-        let report = InterestAccrualReport::no_change(Index(42));
+        let report = InterestAccrualReport::no_change(Index(42), Index(99));
         assert_eq!(report.blocks_elapsed, 0);
         assert_eq!(report.interest_accrued, 0);
         assert_eq!(report.reserves_added, 0);
         assert_eq!(report.new_borrow_index, Index(42));
+        assert_eq!(report.new_supply_index, Index(99));
+        assert_eq!(report.supply_accrued, 0);
+    }
+
+    // ─── supply-side accrual (v1 multi-asset / scaled_supply work) ─────────
+
+    #[test]
+    fn accrual_grows_supply_index_when_borrowed() {
+        // Symmetric to accrual_at_50_percent_utilization_grows_index but
+        // for the supply side. With borrowers, supply_index must grow.
+        let mut m = standard_market();
+        m.total_supplied = 1_000;
+        m.total_borrowed = 500;
+        let before = m.supply_index;
+        let report = accrue_interest(&mut m, 100);
+        assert!(report.new_supply_index.0 > before.0);
+        assert!(report.supply_accrued > 0);
+        assert_eq!(m.supply_index, report.new_supply_index);
+    }
+
+    #[test]
+    fn supply_accrued_equals_interest_minus_reserve_cut() {
+        // Conservation: every unit of interest is either credited to
+        // suppliers or to reserves. Exact equality on the boundary.
+        let mut m = standard_market();
+        m.total_supplied = 1_000;
+        m.total_borrowed = 500;
+        let report = accrue_interest(&mut m, 10_000);
+        assert_eq!(
+            report.supply_accrued + report.reserves_added,
+            report.interest_accrued,
+        );
+    }
+
+    #[test]
+    fn accrual_grows_total_supplied_by_supply_accrued() {
+        // total_supplied tracks nominal supply. After accrual it should
+        // have grown by exactly the supplier-cut interest.
+        let mut m = standard_market();
+        m.total_supplied = 1_000;
+        m.total_borrowed = 500;
+        let before = m.total_supplied;
+        let report = accrue_interest(&mut m, 5_000);
+        assert_eq!(m.total_supplied - before, report.supply_accrued);
+    }
+
+    #[test]
+    fn supply_index_does_not_grow_when_nothing_borrowed() {
+        // No borrowers → no interest → supply_index stays put.
+        let mut m = standard_market();
+        m.total_supplied = 1_000;
+        m.total_borrowed = 0;
+        let before = m.supply_index;
+        let report = accrue_interest(&mut m, 1_000);
+        assert_eq!(report.supply_accrued, 0);
+        assert_eq!(m.supply_index, before);
+    }
+
+    #[test]
+    fn zero_total_supplied_does_not_panic_or_grow_index() {
+        // Boundary: total_borrowed > 0 with total_supplied == 0 is
+        // arithmetically pathological (utilization would be ∞). Our
+        // utilization is capped at 100%, so the rate computation
+        // still produces something. supply_index must not be divided
+        // by zero — accrual short-circuits that branch.
+        let mut m = standard_market();
+        m.total_supplied = 0;
+        m.total_borrowed = 500;
+        let before_supply_index = m.supply_index;
+        let report = accrue_interest(&mut m, 100);
+        // supply_index unchanged (no denominator to grow against), but
+        // total_supplied is credited with the supplier-cut interest
+        // — the bridge-implicit pool absorbs it.
+        assert_eq!(report.new_supply_index, before_supply_index);
+        assert_eq!(m.total_supplied, report.supply_accrued);
+    }
+
+    #[test]
+    fn supplier_position_earns_yield_after_accrual() {
+        // End-to-end: a depositor with a scaled_supply position should
+        // see their nominal_supply grow after accrual runs.
+        use crate::position::supply;
+        use crate::types::{MarketId, Position};
+
+        let mut m = standard_market();
+        m.total_supplied = 1_000;
+        m.total_borrowed = 500;
+
+        // Open a supplier position of 100 at the current (unit) supply_index.
+        let mut depositor = Position::empty(MarketId(0));
+        supply(&mut depositor, 100, m.supply_index).unwrap();
+        let nominal_before = depositor.nominal_supply(m.supply_index);
+        assert_eq!(nominal_before, 100);
+
+        // Run lots of blocks of accrual.
+        accrue_interest(&mut m, 100_000);
+
+        // Depositor's nominal_supply should be strictly greater now
+        // — the index grew, the underlying scaled_supply didn't move.
+        let nominal_after = depositor.nominal_supply(m.supply_index);
+        assert!(
+            nominal_after > nominal_before,
+            "expected yield, got {} → {}",
+            nominal_before,
+            nominal_after,
+        );
+    }
+
+    #[test]
+    fn supply_index_is_monotonic_across_consecutive_accruals() {
+        let mut m = standard_market();
+        m.total_supplied = 10_000;
+        m.total_borrowed = 5_000;
+
+        let index_0 = m.supply_index;
+        accrue_interest(&mut m, 100);
+        let index_1 = m.supply_index;
+        accrue_interest(&mut m, 200);
+        let index_2 = m.supply_index;
+        assert!(index_1.0 > index_0.0);
+        assert!(index_2.0 > index_1.0);
     }
 }

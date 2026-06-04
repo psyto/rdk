@@ -36,6 +36,8 @@ pub enum LendingError {
     NoOutstandingDebt,
     #[error("insufficient collateral to withdraw")]
     InsufficientCollateral,
+    #[error("no outstanding supply to withdraw")]
+    NoOutstandingSupply,
 }
 
 /// Borrow `nominal_amount` of underlying against the position's collateral.
@@ -124,6 +126,74 @@ pub fn withdraw_collateral(position: &mut Position, amount: u128) -> Result<(), 
     }
     position.collateral_amount -= amount;
     Ok(())
+}
+
+/// Supply `nominal_amount` of underlying into the market.
+///
+/// Mirrors [`borrow`] on the supplier side. Converts to scaled supply at
+/// the current `supply_index`: `scaled_delta = nominal × RAY ÷ supply_index`.
+/// Returns the scaled delta so the caller can log it / mirror into
+/// market-level scaled totals if it tracks those.
+///
+/// Liquidity availability (does the market have free reserves to repay
+/// this supply if the supplier withdraws immediately?) is NOT checked
+/// here — that is a market-level concern the bridge handles upstream.
+pub fn supply(
+    position: &mut Position,
+    nominal_amount: u128,
+    supply_index: Index,
+) -> Result<u128, LendingError> {
+    if nominal_amount == 0 {
+        return Err(LendingError::ZeroAmount);
+    }
+    if supply_index.0 == 0 {
+        return Err(LendingError::ZeroIndex);
+    }
+    let product = nominal_amount
+        .checked_mul(Index::RAY)
+        .ok_or(LendingError::AmountTooLarge)?;
+    let scaled_delta = product / supply_index.0;
+    if scaled_delta == 0 {
+        return Err(LendingError::AmountTooSmall);
+    }
+    position.scaled_supply = position.scaled_supply.saturating_add(scaled_delta);
+    Ok(scaled_delta)
+}
+
+/// Withdraw up to `nominal_amount` of supply from the position.
+///
+/// Mirrors [`repay`] on the supplier side. If `nominal_amount` exceeds the
+/// supplier's current nominal supply, the actual withdraw is capped at
+/// the current supply (no over-withdraw). Returns the nominal amount
+/// actually withdrawn.
+///
+/// Market-level liquidity gating (is there enough free liquidity to
+/// fulfill this withdraw without affecting borrower-side utilization?)
+/// is NOT checked here — that is bridge-level work, mirroring how the
+/// borrower-side `withdraw_collateral` defers health to the bridge.
+pub fn withdraw_supply(
+    position: &mut Position,
+    nominal_amount: u128,
+    supply_index: Index,
+) -> Result<u128, LendingError> {
+    if nominal_amount == 0 {
+        return Err(LendingError::ZeroAmount);
+    }
+    if supply_index.0 == 0 {
+        return Err(LendingError::ZeroIndex);
+    }
+    let current_nominal = position.nominal_supply(supply_index);
+    if current_nominal == 0 {
+        return Err(LendingError::NoOutstandingSupply);
+    }
+    let actual_withdrawn = nominal_amount.min(current_nominal);
+
+    let product = actual_withdrawn
+        .checked_mul(Index::RAY)
+        .ok_or(LendingError::AmountTooLarge)?;
+    let scaled_delta = product / supply_index.0;
+    position.scaled_supply = position.scaled_supply.saturating_sub(scaled_delta);
+    Ok(actual_withdrawn)
 }
 
 #[cfg(test)]
@@ -288,5 +358,141 @@ mod tests {
         let mut p = fresh_position();
         deposit_collateral(&mut p, 1_000).unwrap();
         assert_eq!(withdraw_collateral(&mut p, 0), Err(LendingError::ZeroAmount));
+    }
+
+    // --- supply ---
+
+    #[test]
+    fn supply_at_unit_index_scales_one_to_one() {
+        let mut p = fresh_position();
+        let scaled = supply(&mut p, 100, Index::ONE).unwrap();
+        assert_eq!(scaled, 100);
+        assert_eq!(p.scaled_supply, 100);
+        assert_eq!(p.nominal_supply(Index::ONE), 100);
+    }
+
+    #[test]
+    fn supply_at_double_index_halves_scaled() {
+        let mut p = fresh_position();
+        let two_x = Index(Index::RAY * 2);
+        let scaled = supply(&mut p, 100, two_x).unwrap();
+        assert_eq!(scaled, 50);
+        assert_eq!(p.scaled_supply, 50);
+        assert_eq!(p.nominal_supply(two_x), 100);
+    }
+
+    #[test]
+    fn supply_accumulates_across_calls() {
+        let mut p = fresh_position();
+        supply(&mut p, 100, Index::ONE).unwrap();
+        supply(&mut p, 50, Index::ONE).unwrap();
+        assert_eq!(p.scaled_supply, 150);
+    }
+
+    #[test]
+    fn supply_zero_amount_errors() {
+        let mut p = fresh_position();
+        assert_eq!(supply(&mut p, 0, Index::ONE), Err(LendingError::ZeroAmount));
+        assert_eq!(p.scaled_supply, 0);
+    }
+
+    #[test]
+    fn supply_zero_index_errors() {
+        let mut p = fresh_position();
+        assert_eq!(supply(&mut p, 100, Index(0)), Err(LendingError::ZeroIndex));
+    }
+
+    #[test]
+    fn supply_amount_too_small_errors() {
+        let mut p = fresh_position();
+        let huge = Index(u128::MAX);
+        assert_eq!(supply(&mut p, 1, huge), Err(LendingError::AmountTooSmall));
+    }
+
+    #[test]
+    fn supply_amount_too_large_errors() {
+        let mut p = fresh_position();
+        let too_big = u128::MAX / Index::RAY + 1;
+        assert_eq!(supply(&mut p, too_big, Index::ONE), Err(LendingError::AmountTooLarge));
+    }
+
+    #[test]
+    fn supply_does_not_touch_debt_fields() {
+        // Cross-field invariant: supply mutates only scaled_supply.
+        let mut p = fresh_position();
+        deposit_collateral(&mut p, 5_000).unwrap();
+        borrow(&mut p, 1_000, Index::ONE).unwrap();
+        supply(&mut p, 200, Index::ONE).unwrap();
+        assert_eq!(p.scaled_supply, 200);
+        assert_eq!(p.scaled_debt, 1_000);
+        assert_eq!(p.collateral_amount, 5_000);
+    }
+
+    // --- withdraw_supply ---
+
+    #[test]
+    fn withdraw_supply_full_zeros_scaled() {
+        let mut p = fresh_position();
+        supply(&mut p, 100, Index::ONE).unwrap();
+        let withdrawn = withdraw_supply(&mut p, 100, Index::ONE).unwrap();
+        assert_eq!(withdrawn, 100);
+        assert_eq!(p.scaled_supply, 0);
+    }
+
+    #[test]
+    fn withdraw_supply_partial_leaves_remainder() {
+        let mut p = fresh_position();
+        supply(&mut p, 100, Index::ONE).unwrap();
+        let withdrawn = withdraw_supply(&mut p, 30, Index::ONE).unwrap();
+        assert_eq!(withdrawn, 30);
+        assert_eq!(p.scaled_supply, 70);
+    }
+
+    #[test]
+    fn withdraw_supply_over_amount_caps_at_current_supply() {
+        let mut p = fresh_position();
+        supply(&mut p, 100, Index::ONE).unwrap();
+        let withdrawn = withdraw_supply(&mut p, 1_000_000, Index::ONE).unwrap();
+        assert_eq!(withdrawn, 100);
+        assert_eq!(p.scaled_supply, 0);
+    }
+
+    #[test]
+    fn withdraw_supply_zero_amount_errors() {
+        let mut p = fresh_position();
+        supply(&mut p, 100, Index::ONE).unwrap();
+        assert_eq!(withdraw_supply(&mut p, 0, Index::ONE), Err(LendingError::ZeroAmount));
+    }
+
+    #[test]
+    fn withdraw_supply_with_no_supply_errors() {
+        let mut p = fresh_position();
+        assert_eq!(
+            withdraw_supply(&mut p, 100, Index::ONE),
+            Err(LendingError::NoOutstandingSupply),
+        );
+    }
+
+    #[test]
+    fn withdraw_supply_zero_index_errors() {
+        let mut p = fresh_position();
+        supply(&mut p, 100, Index::ONE).unwrap();
+        assert_eq!(
+            withdraw_supply(&mut p, 50, Index(0)),
+            Err(LendingError::ZeroIndex),
+        );
+    }
+
+    #[test]
+    fn supply_then_grown_index_yields_more_than_supplied() {
+        // Mirror of the borrower-side accrual contract: after supply at
+        // index_0, if supply_index grows to index_1 > index_0, the
+        // supplier's nominal supply is proportionally larger — the index
+        // mechanism captures yield without touching the position.
+        let mut p = fresh_position();
+        supply(&mut p, 1_000, Index::ONE).unwrap();
+        assert_eq!(p.nominal_supply(Index::ONE), 1_000);
+        let grown = Index(Index::RAY * 11 / 10); // +10%
+        assert_eq!(p.nominal_supply(grown), 1_100);
     }
 }

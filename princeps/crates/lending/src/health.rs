@@ -181,6 +181,7 @@ mod tests {
             market_id: MarketId(0),
             collateral_amount: 1_000,
             scaled_debt: 100,
+            scaled_supply: 0,
         };
         let market = standard_market(); // borrow_index = ONE → nominal == scaled
         let hf = compute_health_factor(&pos, &market, 1, 1);
@@ -195,6 +196,7 @@ mod tests {
             market_id: MarketId(0),
             collateral_amount: 100,
             scaled_debt: 200,
+            scaled_supply: 0,
         };
         let market = standard_market();
         assert!(is_liquidatable(&pos, &market, 1, 1));
@@ -209,6 +211,7 @@ mod tests {
             market_id: MarketId(0),
             collateral_amount: 1_000,
             scaled_debt: 950,
+            scaled_supply: 0,
         };
         let mut market = standard_market();
         market.liquidation_threshold = Bps(9_500);
@@ -227,6 +230,7 @@ mod tests {
             market_id: MarketId(0),
             collateral_amount: 1_000,
             scaled_debt: 100,
+            scaled_supply: 0,
         };
         let mut market = standard_market();
         market.borrow_index = Index(Index::RAY * 2);
@@ -241,6 +245,7 @@ mod tests {
             market_id: MarketId(0),
             collateral_amount: 1_000,
             scaled_debt: 100,
+            scaled_supply: 0,
         };
         let market = standard_market();
         let hf_low_price = compute_health_factor(&pos, &market, 1, 1);

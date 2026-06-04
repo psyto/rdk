@@ -32,5 +32,8 @@ pub mod types;
 pub use accrual::{accrue_interest, InterestAccrualReport};
 pub use health::{compute_health_factor, compute_health_factor_from_values, is_liquidatable};
 pub use irm::compute_borrow_rate;
-pub use position::{borrow, deposit_collateral, repay, withdraw_collateral, LendingError};
+pub use position::{
+    borrow, deposit_collateral, repay, supply, withdraw_collateral, withdraw_supply,
+    LendingError,
+};
 pub use types::{AssetId, Bps, Index, IrmParams, Market, MarketId, Position};
