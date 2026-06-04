@@ -6875,6 +6875,7 @@ dependencies = [
  "princeps-lending",
  "princeps-node",
  "princeps-portfolio",
+ "proptest",
  "rdk-clearing",
  "rdk-clob",
  "rdk-funding",

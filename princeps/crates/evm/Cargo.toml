@@ -46,6 +46,7 @@ reth-node-core       = { workspace = true }
 reth-tasks           = { workspace = true }
 reth-provider        = { workspace = true }
 alloy-genesis        = { workspace = true }
+proptest             = { workspace = true }
 tempfile             = "3"
 
 [lints]

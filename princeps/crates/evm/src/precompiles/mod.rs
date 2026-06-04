@@ -3126,4 +3126,162 @@ mod tests {
         uninstall_operator_registry();
         uninstall_chain_history();
     }
+
+    // ─── E-3 fuzz harness — lending precompile boundary ────────────
+    //
+    // Threat-model row E-3 ("Lending precompile fuzz exposes overflow /
+    // panic that halts the EVM") flagged the precompile boundary as
+    // lacking a systematic fuzzer. These proptest properties cover the
+    // boundary's two invariants:
+    //
+    //   1. Never panic on any input bytes (including malformed,
+    //      truncated, or pathologically long).
+    //   2. Always return a 32-byte output (the EVM ABI shape).
+    //
+    // Properties run without any process-global state installed —
+    // that exercises the "no installed bridge" branches that real
+    // smart-contract callers can hit (e.g., calling the precompile
+    // before boot finishes). With state installed the deeper mutation
+    // logic is covered by the existing e2e tests; here we lock down
+    // the boundary itself.
+    //
+    // 512 cases each — generous enough to surface a parse-overflow
+    // class bug, fast enough to stay in the unit-test loop. Cargo-fuzz /
+    // libFuzzer would be the next step for sustained adversarial
+    // fuzzing (audit-prep follow-up).
+
+    use proptest::prelude::*;
+
+    /// All process-global state is uninstalled — the property here
+    /// is "the precompile never panics on arbitrary input AND
+    /// returns a 32-byte zero word when no state is installed."
+    fn drop_all_lending_state() {
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+    }
+
+    fn assert_safe_32byte_zero(result: PrecompileResult) {
+        let output = result.expect("precompile must not error");
+        assert_eq!(output.bytes.len(), 32, "precompile must return 32-byte word");
+        assert!(
+            output.bytes.iter().all(|b| *b == 0),
+            "no state → zero word expected; got non-zero output",
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 512,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn fuzz_lending_deposit_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_deposit(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_borrow_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_borrow(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_repay_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_repay(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_withdraw_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_withdraw(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_supply_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_supply(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_withdraw_supply_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_withdraw_supply(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_liquidate_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_liquidate(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_health_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_health(&input, 100_000, 0));
+        }
+
+        #[test]
+        fn fuzz_lending_socialize_boundary(input in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            assert_safe_32byte_zero(lending_socialize(&input, 100_000, 0));
+        }
+
+        /// Boundary length grid: every precompile gets hit with inputs
+        /// at and around its expected size. A single property is
+        /// expensive (9× the work), so cases is reduced. Catches an
+        /// off-by-one in the length check (input.len() < N vs ≤).
+        #[test]
+        #[ignore = "boundary-grid: lots of inputs per case; run with --ignored when wanted"]
+        fn fuzz_boundary_lengths_no_panic(
+            len in 0usize..256,
+            seed in any::<u8>(),
+        ) {
+            let _g = TEST_SERIALIZER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop_all_lending_state();
+            let input = vec![seed; len];
+            assert_safe_32byte_zero(lending_deposit(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_borrow(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_repay(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_withdraw(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_supply(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_withdraw_supply(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_liquidate(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_health(&input, 100_000, 0));
+            assert_safe_32byte_zero(lending_socialize(&input, 100_000, 0));
+        }
+    }
 }
