@@ -869,23 +869,57 @@ fn print_scan(bridge: &LiveRethEvmBridge<()>, eth_price: u64) {
 }
 
 fn print_position_list(bridge: &LiveRethEvmBridge<()>) {
+    use std::collections::BTreeMap;
     let positions = bridge.positions_snapshot();
     if positions.is_empty() {
         println!("(no positions)");
         return;
     }
+    // Build a market_id → (borrow_index, supply_index) lookup so we can
+    // surface nominal debt / supply alongside the scaled values per
+    // position. Without the indices the user has to do
+    // `scaled × index ÷ RAY` in their head; with them the supplier and
+    // borrower sides become directly comparable on one line.
+    let market_indices: BTreeMap<u32, (princeps_lending::Index, princeps_lending::Index)> = bridge
+        .markets_snapshot()
+        .into_iter()
+        .map(|(mid, m)| (mid.0, (m.borrow_index, m.supply_index)))
+        .collect();
+
     println!(
-        "{:>10}  {:>10}  {:>12}  {:>12}",
-        "Account", "Market", "Collateral", "ScaledDebt"
+        "{:>8}  {:>6}  {:>12}  {:>12}  {:>12}  {:>14}  {:>14}",
+        "Account",
+        "Market",
+        "Collateral",
+        "ScaledDebt",
+        "ScaledSupply",
+        "NominalDebt",
+        "NominalSupply",
     );
     println!(
-        "{:>10}  {:>10}  {:>12}  {:>12}",
-        "-------", "------", "----------", "----------"
+        "{:>8}  {:>6}  {:>12}  {:>12}  {:>12}  {:>14}  {:>14}",
+        "-------",
+        "------",
+        "----------",
+        "----------",
+        "------------",
+        "--------------",
+        "--------------",
     );
     for ((acc, mid), pos) in positions {
+        let (nominal_debt, nominal_supply) = match market_indices.get(&mid.0) {
+            Some((bi, si)) => (pos.nominal_debt(*bi), pos.nominal_supply(*si)),
+            None => (0, 0),
+        };
         println!(
-            "{:>10}  {:>10}  {:>12}  {:>12}",
-            acc.0, mid.0, pos.collateral_amount, pos.scaled_debt
+            "{:>8}  {:>6}  {:>12}  {:>12}  {:>12}  {:>14}  {:>14}",
+            acc.0,
+            mid.0,
+            pos.collateral_amount,
+            pos.scaled_debt,
+            pos.scaled_supply,
+            nominal_debt,
+            nominal_supply,
         );
     }
 }
