@@ -37,6 +37,8 @@
 //! (persistent across restarts, real network config, multi-validator)
 //! lands in Stage 13f.
 
+mod chain_history;
+
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
