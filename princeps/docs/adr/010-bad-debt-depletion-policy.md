@@ -95,6 +95,6 @@ When this ADR is `Accepted`, the implementing PR touches:
 - `princeps/bin/princeps/src/main.rs` — skip the `scan_unified → absorb_lending_bad_debt` block while `is_lending_halted`.
 - `princeps/docs/threat-model.md` — flip L-5 row from 🚧 **Partial** to 🟡 / ✅ once Layer 1 lands; reference this ADR.
 - `princeps/docs/plans/v0-lending.md` — add a stage entry for the implementation; revise "Open questions / risks" to drop L-5 once landed.
-- Operator manual (separate doc, future) — codify Layer 2 obligations.
+- Operator agreement ([`princeps/docs/operator-agreement.md`](../operator-agreement.md)) — codifies Layer 2 obligations as §4 (lending halt) + §5 (disclosure). Landed 2026-06-04.
 
 Estimated scope: ~300 LOC + tests, mirrors the `oracle_halt_until` change as a baseline.
