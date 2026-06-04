@@ -483,6 +483,38 @@ mod tests {
         assert_eq!(evs_at_7.len(), 2);
     }
 
+    // ─── load_from_path round-trip ─────────────────────────────────
+
+    #[test]
+    fn load_from_path_round_trips_through_a_file() {
+        // Write a small ChainHistory to a temp file, load it back,
+        // construct a store, confirm shape.
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        let original = ChainHistory {
+            blocks: vec![HistoryBlock {
+                height: 42,
+                events: vec![ChainEvent::Socialization {
+                    market_id: 1,
+                    unfilled: 9_999,
+                    declared_by: "op-load".to_string(),
+                }],
+            }],
+        };
+        let bytes = serde_json::to_vec(&original).expect("serialize");
+        f.write_all(&bytes).expect("write");
+        f.flush().expect("flush");
+
+        let loaded = load_from_path(f.path()).expect("load");
+        assert_eq!(loaded.blocks.len(), 1);
+        assert_eq!(loaded.blocks[0].height, 42);
+        assert_eq!(loaded.blocks[0].events.len(), 1);
+
+        let store = ChainHistoryStore::from_history(loaded).expect("construct");
+        let evs = store.peek_at_height(42).expect("event present");
+        assert_eq!(evs.len(), 1);
+    }
+
     #[test]
     fn snapshot_drops_applied_set_so_restored_store_replays() {
         // Snapshot of an apply does NOT carry the applied-set; restored

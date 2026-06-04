@@ -14,6 +14,7 @@ rdk-liquidation = { workspace = true }
 rdk-oracle      = { workspace = true }
 rdk-vault       = { workspace = true }
 serde           = { workspace = true }
+k256            = { version = "0.13", default-features = false, features = ["ecdsa", "std", "precomputed-tables"] }
 
 [dev-dependencies]
 proptest   = { workspace = true }

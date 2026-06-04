@@ -6950,6 +6950,7 @@ dependencies = [
 name = "princeps-node"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "proptest",
  "rdk-clob",
  "rdk-funding",
