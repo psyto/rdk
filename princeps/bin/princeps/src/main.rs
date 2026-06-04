@@ -273,6 +273,32 @@ enum Command {
         /// `[::1]:8545`.
         #[arg(long)]
         rpc_bind: Option<String>,
+
+        /// ADR-010 Layer 3 — operator id registered with the
+        /// boot-time `OperatorRegistry` (the registry the
+        /// `princeps_lending_socialize` precompile at 0x...0c27
+        /// consults). At v0 the key is derived deterministically
+        /// from `--reth-operator-signing-key-seed`; a production
+        /// build would load it from a keystore. Default 1.
+        #[arg(long, default_value_t = 1)]
+        reth_operator_id: u32,
+
+        /// Seed for the demo signing key registered with the
+        /// boot-time `OperatorRegistry`. Default 1. See
+        /// `princeps_node::operator::demo_signing` for the path
+        /// from seed → SEC1 pubkey.
+        #[arg(long, default_value_t = 1)]
+        reth_operator_signing_key_seed: u8,
+
+        /// ADR-010 Layer 3 — chain-history file path. Loaded at boot
+        /// (if present) and saved at shutdown alongside the bridge
+        /// snapshot. Defaults to `<data-dir>/chain-history.json`.
+        /// The socialize precompile appends a
+        /// `ChainEvent::Socialization` here on every successful Layer 3
+        /// invocation; restart-resume re-loads the same store so
+        /// audit history survives across runs.
+        #[arg(long)]
+        reth_chain_history_file: Option<PathBuf>,
     },
 }
 
@@ -412,6 +438,9 @@ fn main() -> eyre::Result<()> {
             validators,
             listen_addr,
             rpc_bind,
+            reth_operator_id,
+            reth_operator_signing_key_seed,
+            reth_chain_history_file,
         } => tokio_rt()?.block_on(run_reth_devnet(
             rounds,
             moniker,
@@ -420,6 +449,9 @@ fn main() -> eyre::Result<()> {
             validators,
             listen_addr,
             rpc_bind,
+            reth_operator_id,
+            reth_operator_signing_key_seed,
+            reth_chain_history_file,
         )),
     }
 }
@@ -991,6 +1023,9 @@ async fn run_reth_devnet(
     validators_path: Option<PathBuf>,
     listen_addr: Option<String>,
     rpc_bind: Option<String>,
+    operator_id: u32,
+    operator_signing_key_seed: u8,
+    chain_history_file: Option<PathBuf>,
 ) -> eyre::Result<()> {
     println!(
         "princeps v{} — driving {} reth-backed decision{}",
@@ -1127,6 +1162,53 @@ async fn run_reth_devnet(
         seed_v0_demo_accounts(bridge.as_ref());
         println!("      lending genesis  = USDC/ETH market + 5 demo accounts seeded");
     }
+
+    // ADR-010 Layer 3 — install the operator-key registry + chain-history
+    // store the `princeps_lending_socialize` precompile at 0x...0c27
+    // reads. Without these, the precompile returns zero (documented
+    // behavior); with them installed, smart contracts can invoke Layer 3
+    // by submitting a signed SocializationDeclaration via calldata.
+    //
+    // The v0 demo seeds a single operator from a deterministic signing
+    // seed (`--reth-operator-signing-key-seed`). A production
+    // deployment loads from a keystore + deployment config and
+    // registers each authorized operator's public key.
+    let reth_chain_history_path = chain_history_file
+        .unwrap_or_else(|| data_dir_path.join("chain-history.json"));
+    let chain_history_for_persist = {
+        use princeps_evm::precompiles::{install_chain_history, install_operator_registry};
+        use princeps_node::chain_history::ChainHistoryStore;
+        use princeps_node::operator::{
+            demo_signing::demo_operator_key, OperatorId, OperatorRegistry,
+        };
+
+        let mut registry = OperatorRegistry::new();
+        registry.register(
+            OperatorId(operator_id),
+            demo_operator_key(operator_signing_key_seed),
+        );
+        install_operator_registry(Arc::new(registry));
+
+        let store = if reth_chain_history_path.exists() {
+            let history = load_chain_history(&reth_chain_history_path)?;
+            ChainHistoryStore::from_history(history).map_err(|e| eyre::eyre!("chain history: {e}"))?
+        } else {
+            ChainHistoryStore::empty()
+        };
+        let event_count: usize = store
+            .heights()
+            .iter()
+            .map(|h| store.peek_at_height(*h).map_or(0, |evs| evs.len()))
+            .sum();
+        let store_arc = Arc::new(store);
+        install_chain_history(Arc::clone(&store_arc));
+        println!(
+            "      socialize boot   = operator {operator_id} (seed={operator_signing_key_seed}) registered; chain-history = {} ({} prior event(s))",
+            reth_chain_history_path.display(),
+            event_count,
+        );
+        store_arc
+    };
 
     let initial_parent_for_consensus = resume_parent.unwrap_or(genesis_parent);
     // Stage 13i: consensus height = prior decisions + 1, so log lines
@@ -1701,6 +1783,25 @@ async fn run_reth_devnet(
         chain_len,
         bridge_state_path.display()
     );
+
+    // ADR-010 Layer 3 — persist any chain-history events recorded
+    // during this run (including Layer 3 socialization events
+    // appended by the `princeps_lending_socialize` precompile) so
+    // the next boot resumes the same audit log. We hold an Arc to
+    // the installed store from the boot-time install so we can
+    // snapshot it here without going back through the precompile
+    // RwLock.
+    {
+        let snap = chain_history_for_persist.snapshot();
+        let event_count: usize = snap.blocks.iter().map(|b| b.events.len()).sum();
+        save_chain_history(&reth_chain_history_path, &snap)?;
+        println!(
+            "persisted chain history ({} event(s) across {} block(s)) → {}",
+            event_count,
+            snap.blocks.len(),
+            reth_chain_history_path.display(),
+        );
+    }
 
     // Stage 14e: persist the coordinator's load-bearing state alongside
     // the bridge snapshot so the next boot resumes the insurance fund,
