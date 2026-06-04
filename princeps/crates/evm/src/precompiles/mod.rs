@@ -29,7 +29,10 @@ use rdk_funding::Notional;
 use princeps_lending::{
     borrow as lending_position_borrow, compute_health_factor as lending_compute_health_factor,
     deposit_collateral as lending_position_deposit_collateral,
-    repay as lending_position_repay, withdraw_collateral as lending_position_withdraw_collateral,
+    repay as lending_position_repay,
+    supply as lending_position_supply,
+    withdraw_collateral as lending_position_withdraw_collateral,
+    withdraw_supply as lending_position_withdraw_supply,
     Index as LendingIndex, Market, MarketId, Position,
 };
 use std::collections::{BTreeMap, HashMap};
@@ -174,6 +177,37 @@ pub const PRINCEPS_LENDING_LIQUIDATE: Address =
 /// Returns `u256::MAX` for "no debt = infinite health".
 pub const PRINCEPS_LENDING_HEALTH: Address =
     address!("0x0000000000000000000000000000000000000c23");
+
+/// `princeps_lending_supply` precompile address (v1 multi-asset / scaled_supply
+/// work — follow-up to `b1b5981`).
+///
+/// Solidity call shape (96-byte input):
+/// `call(gas, 0x...0c25, calldata=(uint64 account, uint32 market_id, uint128 amount), ...) → uint256 new_nominal_supply`
+///
+/// Returns the post-supply nominal balance (low 16 bytes of u256), zero on
+/// error (market doesn't exist, bridge not installed, scaled-supply math
+/// fails). The supplier-side mirror of
+/// [`PRINCEPS_LENDING_DEPOSIT_COLLATERAL`]. Caller transfers the underlying
+/// to the pool separately — this precompile only mutates lending state.
+pub const PRINCEPS_LENDING_SUPPLY: Address =
+    address!("0x0000000000000000000000000000000000000c25");
+
+/// `princeps_lending_withdraw_supply` precompile address (v1 multi-asset /
+/// scaled_supply work — follow-up to `b1b5981`).
+///
+/// Solidity call shape (96-byte input):
+/// `call(gas, 0x...0c26, calldata=(uint64 account, uint32 market_id, uint128 amount), ...) → uint256 nominal_withdrawn`
+///
+/// Returns the nominal amount actually withdrawn (low 16 bytes of u256),
+/// capped at the supplier's current nominal_supply and zero-if-rejected.
+/// Rejected when the post-withdraw `total_supplied` would fall below
+/// `total_borrowed` (would push utilization above 100% and oversubscribe
+/// borrowers). Mirrors the relationship between
+/// [`PRINCEPS_LENDING_REPAY`] (borrower-side wind-down) and the
+/// `withdraw_collateral` precompile, except the rejection ground is
+/// market-utilization rather than position-health.
+pub const PRINCEPS_LENDING_WITHDRAW_SUPPLY: Address =
+    address!("0x0000000000000000000000000000000000000c26");
 
 /// Base gas for lending precompiles (Stage 21). Higher than CLOB because
 /// of per-position state mutation + market totals update + (for borrow/
@@ -1063,6 +1097,185 @@ pub(crate) fn lending_withdraw(
     ))
 }
 
+/// `princeps_lending_supply` precompile handler (supplier-side mirror of
+/// [`lending_deposit`]).
+///
+/// Adds `amount` of nominal supply to the caller's `scaled_supply` position
+/// in the named market. The underlying token transfer (caller → pool) is
+/// the EVM caller's responsibility — this precompile only mutates lending
+/// state. The bridge-owned implicit pool continues to provide initial
+/// liquidity in parallel (`b1b5981`'s additive model).
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn lending_supply(
+    input: &[u8],
+    _gas_limit: u64,
+    _reservoir: u64,
+) -> PrecompileResult {
+    let zero_out = vec![0u8; 32];
+    if input.len() < 96 {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    }
+    let account_id = u64_from_be_chunk(&input[0..32]);
+    let market_id = u32_from_be_chunk(&input[32..64]);
+    let amount = u128_from_be_chunk(&input[64..96]);
+
+    let markets_handle = MARKETS_STATE.read().expect("MARKETS_STATE rwlock poisoned");
+    let positions_handle = POSITIONS_STATE
+        .read()
+        .expect("POSITIONS_STATE rwlock poisoned");
+    let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
+    else {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    };
+
+    let mut markets_guard = markets.lock().expect("markets mutex poisoned");
+    let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    };
+    let Some(new_supplied) = market.total_supplied.checked_add(amount) else {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    };
+    let supply_index = market.supply_index;
+
+    let mut positions_guard = positions.lock().expect("positions mutex poisoned");
+    let key = (AccountId(account_id), MarketId(market_id));
+    let position = positions_guard
+        .entry(key)
+        .or_insert_with(|| Position::empty(MarketId(market_id)));
+    if lending_position_supply(position, amount, supply_index).is_err() {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    }
+    let new_nominal = position.nominal_supply(supply_index);
+    market.total_supplied = new_supplied;
+
+    Ok(PrecompileOutput::new(
+        LENDING_BASE_GAS_COST,
+        Bytes::from(u128_in_low_word(new_nominal)),
+        0,
+    ))
+}
+
+/// `princeps_lending_withdraw_supply` precompile handler (supplier-side
+/// mirror of [`lending_repay`]).
+///
+/// Withdraws up to `amount` of nominal supply from the caller's
+/// `scaled_supply` position. The actual withdrawal is capped at the
+/// caller's current `nominal_supply(supply_index)`. The withdrawal is
+/// rejected entirely (returns zero) when the post-withdraw
+/// `total_supplied` would fall below `total_borrowed` — that would push
+/// utilization above 100% and oversubscribe borrowers, which is the
+/// supplier-side analog to a position falling below the health-factor
+/// threshold on the borrower side.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn lending_withdraw_supply(
+    input: &[u8],
+    _gas_limit: u64,
+    _reservoir: u64,
+) -> PrecompileResult {
+    let zero_out = vec![0u8; 32];
+    if input.len() < 96 {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    }
+    let account_id = u64_from_be_chunk(&input[0..32]);
+    let market_id = u32_from_be_chunk(&input[32..64]);
+    let amount = u128_from_be_chunk(&input[64..96]);
+
+    let markets_handle = MARKETS_STATE.read().expect("MARKETS_STATE rwlock poisoned");
+    let positions_handle = POSITIONS_STATE
+        .read()
+        .expect("POSITIONS_STATE rwlock poisoned");
+    let (Some(markets), Some(positions)) = (markets_handle.as_ref(), positions_handle.as_ref())
+    else {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    };
+
+    let mut markets_guard = markets.lock().expect("markets mutex poisoned");
+    let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    };
+    let supply_index = market.supply_index;
+    let total_borrowed = market.total_borrowed;
+    let total_supplied = market.total_supplied;
+
+    let mut positions_guard = positions.lock().expect("positions mutex poisoned");
+    let key = (AccountId(account_id), MarketId(market_id));
+    let Some(position) = positions_guard.get_mut(&key) else {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    };
+
+    // Hypothetically withdraw — withdraw_supply caps at the supplier's
+    // current nominal balance internally, so we read back the actual
+    // amount it consumed.
+    let mut hypothetical = position.clone();
+    let Ok(actual_withdrawn) =
+        lending_position_withdraw_supply(&mut hypothetical, amount, supply_index)
+    else {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    };
+
+    // Utilization safety gate: refuse withdrawals that would push
+    // total_supplied below total_borrowed. With the additive
+    // bridge-implicit-pool model from b1b5981, this protects borrowers
+    // from a supplier exodus that strands the pool.
+    let new_total_supplied = total_supplied.saturating_sub(actual_withdrawn);
+    if new_total_supplied < total_borrowed {
+        return Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(zero_out),
+            0,
+        ));
+    }
+
+    *position = hypothetical;
+    market.total_supplied = new_total_supplied;
+
+    Ok(PrecompileOutput::new(
+        LENDING_BASE_GAS_COST,
+        Bytes::from(u128_in_low_word(actual_withdrawn)),
+        0,
+    ))
+}
+
 /// `princeps_lending_liquidate` precompile handler (Stage 22b).
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn lending_liquidate(
@@ -1303,6 +1516,16 @@ pub fn princeps_precompiles(base: &Precompiles) -> Precompiles {
             PrecompileId::custom("princeps_lending_health"),
             PRINCEPS_LENDING_HEALTH,
             lending_health,
+        ),
+        Precompile::new(
+            PrecompileId::custom("princeps_lending_supply"),
+            PRINCEPS_LENDING_SUPPLY,
+            lending_supply,
+        ),
+        Precompile::new(
+            PrecompileId::custom("princeps_lending_withdraw_supply"),
+            PRINCEPS_LENDING_WITHDRAW_SUPPLY,
+            lending_withdraw_supply,
         ),
     ]);
     precompiles
@@ -2176,6 +2399,267 @@ mod tests {
             Some((1_000, 0)),
             "outer deposit should persist; debt should be cleared"
         );
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+    }
+
+    // ─── supplier-side precompiles (b1b5981 follow-up) ─────────────
+
+    #[test]
+    fn lending_supply_precompile_e2e_mutates_position() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+
+        let (markets, positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        install_lending_positions(Arc::clone(&positions));
+
+        // Snapshot pre-call total_supplied for the conservation check.
+        let prior_supplied = markets
+            .lock()
+            .unwrap()
+            .get(&MarketId(0))
+            .unwrap()
+            .total_supplied;
+
+        let input = encode_3_chunk_input(7, 0, 500);
+        let result = lending_supply(&input, 100_000, 0).unwrap();
+        let new_nominal = decode_u128_from_low_word(&result.bytes);
+        // At inception supply_index == RAY, so 500 supplied → 500 nominal.
+        assert_eq!(new_nominal, 500);
+
+        let positions_guard = positions.lock().unwrap();
+        let position = positions_guard
+            .get(&(AccountId(7), MarketId(0)))
+            .expect("position created");
+        assert!(position.scaled_supply > 0);
+        // Conservation: market.total_supplied grew by exactly amount.
+        let new_supplied = markets
+            .lock()
+            .unwrap()
+            .get(&MarketId(0))
+            .unwrap()
+            .total_supplied;
+        assert_eq!(new_supplied - prior_supplied, 500);
+        drop(positions_guard);
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+    }
+
+    #[test]
+    fn lending_supply_short_input_returns_zero() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+
+        let (markets, positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        install_lending_positions(Arc::clone(&positions));
+
+        let short = vec![0u8; 32]; // need 96
+        let result = lending_supply(&short, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 0);
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+    }
+
+    #[test]
+    fn lending_supply_unknown_market_returns_zero() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+
+        let (markets, positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        install_lending_positions(Arc::clone(&positions));
+
+        // market_id = 999 doesn't exist
+        let input = encode_3_chunk_input(7, 999, 500);
+        let result = lending_supply(&input, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 0);
+
+        // No position created.
+        assert!(positions.lock().unwrap().get(&(AccountId(7), MarketId(0))).is_none());
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+    }
+
+    #[test]
+    fn lending_supply_then_withdraw_supply_round_trip() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+
+        let (markets, positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        install_lending_positions(Arc::clone(&positions));
+
+        // Supply 1_000 then withdraw 400 — both should succeed; final
+        // nominal_supply should be 600.
+        let supply_in = encode_3_chunk_input(11, 0, 1_000);
+        let supply_out = lending_supply(&supply_in, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&supply_out.bytes), 1_000);
+
+        let withdraw_in = encode_3_chunk_input(11, 0, 400);
+        let withdraw_out = lending_withdraw_supply(&withdraw_in, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&withdraw_out.bytes), 400);
+
+        let positions_guard = positions.lock().unwrap();
+        let position = positions_guard
+            .get(&(AccountId(11), MarketId(0)))
+            .expect("position still present");
+        // supply_index is still ONE (no accrual mid-test); so nominal == scaled.
+        assert_eq!(position.scaled_supply, 600);
+        drop(positions_guard);
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+    }
+
+    #[test]
+    fn lending_withdraw_supply_caps_at_current_nominal() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+
+        let (markets, positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        install_lending_positions(Arc::clone(&positions));
+
+        let supply_in = encode_3_chunk_input(11, 0, 200);
+        lending_supply(&supply_in, 100_000, 0).unwrap();
+
+        // Ask to withdraw 10_000; should cap at 200.
+        let withdraw_in = encode_3_chunk_input(11, 0, 10_000);
+        let withdraw_out = lending_withdraw_supply(&withdraw_in, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&withdraw_out.bytes), 200);
+
+        let positions_guard = positions.lock().unwrap();
+        let position = positions_guard.get(&(AccountId(11), MarketId(0))).unwrap();
+        assert_eq!(position.scaled_supply, 0);
+        drop(positions_guard);
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+    }
+
+    #[test]
+    fn lending_withdraw_supply_rejected_when_would_oversubscribe_borrowers() {
+        // The supplier safety gate: withdraw is refused if it would
+        // push total_supplied below total_borrowed.
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+
+        let (markets, positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        install_lending_positions(Arc::clone(&positions));
+
+        // Stack the deck so the borrower side is sized close to the
+        // supply side. Account 1 deposits 1_000 collateral and borrows
+        // a substantial amount; account 2 supplies a smaller amount;
+        // then account 2 tries to withdraw all of it.
+        let deposit_in = encode_3_chunk_input(1, 0, 1_000);
+        lending_deposit(&deposit_in, 100_000, 0).unwrap();
+        let borrow_in = encode_5_chunk_input(1, 0, 700, 1, 1);
+        let borrow_out = lending_borrow(&borrow_in, 100_000, 0).unwrap();
+        assert_eq!(
+            decode_u128_from_low_word(&borrow_out.bytes),
+            1,
+            "borrow should succeed",
+        );
+        let supply_in = encode_3_chunk_input(2, 0, 200);
+        lending_supply(&supply_in, 100_000, 0).unwrap();
+
+        // total_supplied is now (initial + 200), total_borrowed is 700.
+        // Capture pre-state to assert nothing changes.
+        let pre_total_supplied = markets
+            .lock()
+            .unwrap()
+            .get(&MarketId(0))
+            .unwrap()
+            .total_supplied;
+        let pre_scaled = positions
+            .lock()
+            .unwrap()
+            .get(&(AccountId(2), MarketId(0)))
+            .unwrap()
+            .scaled_supply;
+
+        // Attempt to withdraw enough that total_supplied drops below
+        // total_borrowed. With initial = 1_000_000 in the test market,
+        // this is hard to trigger from one supplier — so we test the
+        // happy refusal by manually shrinking total_supplied first to
+        // make the gate active.
+        {
+            let mut m = markets.lock().unwrap();
+            let market = m.get_mut(&MarketId(0)).unwrap();
+            // Push total_supplied so that withdrawing 200 would drop
+            // it below the 700 total_borrowed.
+            market.total_supplied = 750;
+        }
+
+        let withdraw_in = encode_3_chunk_input(2, 0, 200);
+        let withdraw_out = lending_withdraw_supply(&withdraw_in, 100_000, 0).unwrap();
+        assert_eq!(
+            decode_u128_from_low_word(&withdraw_out.bytes),
+            0,
+            "withdraw should be rejected",
+        );
+        // Position scaled_supply unchanged.
+        let post_scaled = positions
+            .lock()
+            .unwrap()
+            .get(&(AccountId(2), MarketId(0)))
+            .unwrap()
+            .scaled_supply;
+        assert_eq!(pre_scaled, post_scaled);
+        // total_supplied still at the doctored value (no decrement).
+        let post_total_supplied = markets
+            .lock()
+            .unwrap()
+            .get(&MarketId(0))
+            .unwrap()
+            .total_supplied;
+        assert_eq!(post_total_supplied, 750);
+        let _ = pre_total_supplied;
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+    }
+
+    #[test]
+    fn lending_withdraw_supply_with_no_position_returns_zero() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+
+        let (markets, positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        install_lending_positions(Arc::clone(&positions));
+
+        let input = encode_3_chunk_input(99, 0, 500);
+        let result = lending_withdraw_supply(&input, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 0);
 
         uninstall_lending_markets();
         uninstall_lending_positions();
