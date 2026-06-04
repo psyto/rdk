@@ -1,6 +1,6 @@
 # ADR-010 — Bad-debt depletion policy
 
-**Status**: Proposed (2026-06-04)
+**Status**: Accepted (2026-06-04)
 **Scope**: v0–v1 lending (until tokenomics + on-chain stake supersede)
 
 > ADR-009 is reserved for tokenomics + on-chain slashing per the sunset clause in [ADR-008](./008-pre-token-validator-policy.md). This ADR uses the next free number.
