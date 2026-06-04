@@ -49,6 +49,16 @@ Operator solvency is not a protocol-enforceable property at v0–v1; this is the
 
 ### Layer 3 — socialized loss (fallback, requires operator declaration)
 
+> **Implementation deferred (recorded 2026-06-04).** When this section was written, Layer 3 was specified against a v1+ surface that doesn't exist at v0:
+>
+> 1. **No per-depositor positions.** `lending::Position` tracks `collateral_amount` + `scaled_debt` (borrower-side only). No `scaled_supply` field. v0's supply side is the bridge itself — a pre-funded, bridge-owned pool. `accrual.rs` is explicit: "v0 ships without supplier-side `supply_index` accounting."
+> 2. **No princeps-side chain history.** The per-block event replay the section references lives in `openhl/bin/openhl/src/main.rs::chain_history`. Princeps hasn't pulled it across.
+> 3. **No operator-sig admission infrastructure.** The closest pattern is `oracle::PublisherKey` ECDSA — per-publisher, not per-operator. Layer 2's operator agreement ([`operator-agreement.md`](../operator-agreement.md)) is legal-only, not cryptographic.
+>
+> v0 therefore has **no third-party depositor population to socialize against** — the bridge-owned pool absorbs any residual that Layer 2 declines, which is operationally equivalent to operator-cap. The three infrastructure dependencies above are themselves a substantial design space (per-asset positions, princeps-side chain history, operator-key registry) that should not be sneaked in via Layer 3. Implementation is gated on the v1 multi-asset / scaled_supply work (currently outside the v0 lending plan); the surface specified below is the design target for that work to satisfy.
+>
+> Until that point, Layer 1 + Layer 2 fully cover the v0 threat surface for L-5 — see threat-model row L-5.
+
 If the operator declares Layer 2 cannot cover, lender principal absorbs the residual `unfilled` amount pro-rata across all USDC depositors at the moment of declaration. The mechanics are:
 
 - A `socialize_residual(unfilled: u128) -> SocializationReport` call on `PrincepsNode`, gated behind a `LendingMarketState::accept_socialization(operator_sig)` admission check.
@@ -81,6 +91,7 @@ What halt does NOT prevent (intentionally):
 - **Operator-cap is not protocol-enforceable**. An undercapitalized operator can't make depositors whole regardless of what the agreement says. Mitigation: same as ADR-008 — prefer operators whose balance sheet is publicly known, document the dependency. v3 sunsets via on-chain stake.
 - **Socialization is publicly toxic**. Depositors taking unannounced haircuts is exactly the "DeFi lending blew up" story. Mitigation: require operator declaration + 72-hour public post-mortem (Layer 2 obligation 2). The protocol's algorithmic Layer 1 buys the window in which the human decision happens publicly rather than silently.
 - **Precompile-level enforcement is v1 work**. At v0 a determined borrower can still open a position during a halt window via direct precompile call. Mitigation: documented; same scope as the existing oracle circuit breaker (princeps `crates/node/src/lib.rs:88-92`); the v1 work is the same change in both cases (precompiles read coordinator state).
+- **Layer 3 specified before its dependencies exist.** The Decision text for Layer 3 references infrastructure (scaled_supply, princeps chain history, operator-sig admission) that is not built. Acceptable at v0 because the supply side is the bridge-owned pool — there is no third-party depositor population to socialize against, so the gap is benign for v0 and the dependencies are themselves outside the v0 lending plan. At v1 multi-asset when scaled_supply lands, Layer 3 implementation must follow before depositors are exposed.
 
 ## Forecloses
 
@@ -88,13 +99,17 @@ Nothing permanent. ADR-009 (tokenomics + on-chain stake, forthcoming) supersedes
 
 ## Implementation pointers
 
-When this ADR is `Accepted`, the implementing PR touches:
+Layered status as of 2026-06-04:
 
-- `princeps/crates/node/src/lib.rs` — add `LendingHaltParams`, `lending_halt_until`, `is_lending_halted`, snapshot serde. Mirror existing oracle-halt shape.
-- `princeps/crates/node/src/lib.rs::PrincepsNode::tick` — add the post-`absorb_lending_bad_debt` check + arm logic.
-- `princeps/bin/princeps/src/main.rs` — skip the `scan_unified → absorb_lending_bad_debt` block while `is_lending_halted`.
-- `princeps/docs/threat-model.md` — flip L-5 row from 🚧 **Partial** to 🟡 / ✅ once Layer 1 lands; reference this ADR.
-- `princeps/docs/plans/v0-lending.md` — add a stage entry for the implementation; revise "Open questions / risks" to drop L-5 once landed.
-- Operator agreement ([`princeps/docs/operator-agreement.md`](../operator-agreement.md)) — codifies Layer 2 obligations as §4 (lending halt) + §5 (disclosure). Landed 2026-06-04.
+- **Layer 1 ✅ landed** (`b1d82f0`):
+  - `princeps/crates/node/src/lib.rs` — `LendingHaltParams`, `lending_halt_until`, `is_lending_halted`, snapshot serde.
+  - `princeps/crates/node/src/lib.rs::PrincepsNode::tick` — post-vault-MTM check + arm logic; `TickReport::lending_halt_tripped_until`.
+  - `princeps/bin/princeps/src/main.rs` — skips the `scan_unified → absorb_lending_bad_debt` block while `is_lending_halted`.
+  - 12 new tests in `princeps-node` (arm/extend/expiry/burst-rollout/snapshot-roundtrip/serde-default/accumulator).
+- **Layer 2 ✅ landed** (`139a93c`):
+  - Operator agreement [`princeps/docs/operator-agreement.md`](../operator-agreement.md) — §4 lending halt make-whole, §5 72-hour disclosure. v0 template, signed instances awaited at v1 mainnet onboarding.
+- **Layer 3 deferred** to v1 multi-asset / `scaled_supply` work — see the Decision > Layer 3 deferral note above. Gated on: `scaled_supply` field on `lending::Position`, princeps-side chain history (port the openhl Stage 21 pattern), and operator-sig admission infrastructure (likely ECDSA against an operator-key registry, mirroring `oracle::PublisherKey`).
+- **Threat-model L-5 row**: updated 2026-06-04 to reflect Layer 1 ✅ + Layer 2 ✅ + Layer 3 deferred.
+- **`princeps/docs/plans/v0-lending.md`** — Layer 1/2 status entries TBD; the "Open questions / risks" L-5 mention can be marked resolved-for-v0 once this ADR's deferral note is accepted.
 
 Estimated scope: ~300 LOC + tests, mirrors the `oracle_halt_until` change as a baseline.
