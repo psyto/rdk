@@ -1,8 +1,8 @@
 # Princeps v0 — Lending build plan
 
-**Status**: In progress, ~8 weeks ahead of plan
+**Status**: Protocol work complete (as of 2026-06-05); public-testnet deployment pending.
 **Target**: Q3 2026 public testnet of the lending primitive + cross-margin model
-**Scope**: Single asset pair (USDC collateral, ETH borrow) with deterministic sub-second liquidations and portfolio margin
+**Scope**: Single asset pair (USDC collateral, ETH borrow) with deterministic sub-second liquidations and portfolio margin. Post-Stage-24 hardening (ADR-010 bad-debt depletion, threat-model E-3/E-4) landed 2026-06-04/05 — see [Progress as of 2026-06-05](#progress-as-of-2026-06-05--post-stage-24-hardening-adr-010--threat-model).
 
 ## Progress as of 2026-06-03
 
@@ -37,8 +37,28 @@
 | `0x...0c22` | `princeps_lending_withdraw_collateral` |
 | `0x...0c23` | `princeps_lending_health` (staticcall-safe) |
 | `0x...0c24` | `princeps_lending_liquidate` |
+| `0x...0c25` | `princeps_lending_supply` (v1 multi-asset foundation, b1b5981/d46f379) |
+| `0x...0c26` | `princeps_lending_withdraw_supply` (v1 multi-asset foundation) |
+| `0x...0c27` | `princeps_lending_socialize` (ADR-010 Layer 3 EVM entrypoint, d6e05d8) |
 
-The original plan structure (below) is preserved as the source-of-truth for what each stage covers and the architectural decisions behind them. Update this Progress section as stages ship.
+## Progress as of 2026-06-05 — post-Stage-24 hardening (ADR-010 + threat-model)
+
+The work below was scheduled as v1 / pre-mainnet hardening but pulled forward into a single push following the 2026-06-03 rdk migration. None of it changes the v0 ship scope below; it landed because the deferral risk was higher than the implementation cost once the migration was complete.
+
+| Workstream | Status | Commits | Notes |
+|---|---|---|---|
+| ADR-010 Layer 1 — algorithmic lending halt | ✅ Complete | `b1d82f0`, `d293d1d` | `LendingHaltParams` (v0: 50% running-coverage / 200-block halt / 128-block window); `lending_halt_until` persists across restart via `CoordinatorSnapshot`; bin/princeps skips `scan_unified → absorb_lending_bad_debt` while halted. +12 tests in `princeps-node`. |
+| ADR-010 Layer 2 — operator agreement | ✅ Template | `139a93c` | `princeps/docs/operator-agreement.md` — 7-section v0 template carrying ADR-008's 4 clause categories + ADR-010's 2 new clauses (§4 lending-halt make-whole, §5 72-hour disclosure). Combined liability cap. Audit-bundle ready; signed instances awaited at v1 mainnet onboarding. |
+| ADR-010 Layer 3 — supplier-side foundation | ✅ Complete | `b1b5981`, `d46f379` | `scaled_supply: u128` on `lending::Position`; `nominal_supply` accessor; `position::supply` / `withdraw_supply`; supplier-side accrual (`supply_index` grows per Aave standard); supplier-side EVM precompiles at `0x...0c25` / `0x...0c26`. +9 tests in `princeps-lending`, +6 in `princeps-evm`. |
+| ADR-010 Layer 3 — chain history | ✅ Complete | `406ba5a` | `princeps_node::chain_history::ChainHistoryStore` — unified replay + runtime append. `ChainEvent::Socialization` variant. JSON wire format; snapshot/restore for cross-restart audit log. +11 tests in `princeps-node`. |
+| ADR-010 Layer 3 — operator-sig admission | ✅ Complete | `906d659` | `princeps_node::operator::{OperatorRegistry, OperatorKey, SocializationDeclaration, verify_socialization_declaration}` — secp256k1 ECDSA; replay-protected via `block_height`. +14 tests. |
+| ADR-010 Layer 3 — primitive | ✅ Complete | `e886444` | `princeps_lending::socialize_residual` — pure-compute haircut. Per-account positions repriced via `supply_index`; bridge-implicit pool absorbs proportionally; conservation `sum(per-position nominal) + bridge_implicit ≡ total_supplied` holds across the haircut. +9 tests. |
+| ADR-010 Layer 3 — entrypoints | ✅ Complete | `bd5b21b`, `d6e05d8`, `f65a025` | `princeps socialize` CLI subcommand; `princeps_lending_socialize` precompile at `0x...0c27`; boot-time install of `OperatorRegistry` + `ChainHistoryStore` from new `--reth-operator-*` / `--reth-chain-history-file` flags; chain-history persisted across restart alongside the bridge snapshot. +7 tests in `princeps-evm`. |
+| Threat-model E-3 — precompile boundary fuzz | ✅/🚧 | `56cd549` | 9 proptest properties × 512 cases each (~4,600 random-byte inputs per `cargo test` run). Boundary-length grid (`#[ignore]`, opt-in). cargo-fuzz follow-up pending Q4 2026 audit prep. |
+| Threat-model E-4 — gas pricing | ✅/🚧 | `7fad4d3`, `c71c99b` | Original uniform `LENDING_BASE_GAS_COST = 2_000` replaced with 9 differentiated constants (HEALTH 1_500 → ... → SOCIALIZE 8_000). Criterion harness at `princeps/crates/evm/benches/lending_precompiles.rs`; 2026-06-04 baseline confirms relative ordering. Absolute-value recalibration on validator-grade hardware pre-mainnet. |
+| Threat-model L-5 closure | ✅ Complete | (rolled into ADR-010 commits above) | Row flipped from 🚧 Partial to ✅ across all three layers; Known gaps shrunk from 5 → 4. See `princeps/docs/threat-model.md` and `princeps/docs/adr/010-bad-debt-depletion-policy.md` for full audit trail. |
+
+The original plan structure (below) is preserved as the source-of-truth for what each stage covers and the architectural decisions behind them. Update the Progress sections as stages ship.
 
 ---
 
@@ -209,10 +229,16 @@ Acceptance: third party clones repo, runs demo script, witnesses full lifecycle 
 
 1. **Block time**: per-block tick assumes ~1s blocks. Liquidation-latency claims depend on this. Verify on the running devnet before locking the "sub-second" framing in marketing.
 2. **USDC depeg policy**: hardcoded thresholds vs governance? v0 hardcoded (no governance yet per ADR-007).
-3. **Liquidator UX**: sample liquidator bot in Stage 24e to make demo compelling — committed.
-4. **Reth EVM precompile gas pricing**: need research for realistic gas. Open question for Stage 21.
-5. **Multi-market readiness**: v0 ships single-market but data structures (`BTreeMap<MarketId, ...>`) must not force a refactor for v1 multi-market. Validate during Stage 19/20 design.
+3. ~~**Liquidator UX**~~ — closed by Stage 24e (`princeps-liquidator-bot` ships).
+4. ~~**Reth EVM precompile gas pricing**~~ — closed by E-4 work: per-precompile constants in `7fad4d3` + criterion harness in `c71c99b`. Absolute-value recalibration on validator-grade hardware remains pre-mainnet (see threat-model E-4 ✅/🚧 status).
+5. **Multi-market readiness**: v0 ships single-market but data structures (`BTreeMap<MarketId, ...>`) must not force a refactor for v1 multi-market. Validated during Stage 19/20 design + reinforced by `b1b5981`'s additive `scaled_supply` foundation (per-asset positions and accrual already index by `MarketId`).
 
-## Suggested first action
+Newer items added since 2026-06-04 (post-Stage-24 hardening):
 
-**Stage 19a — define `Market` and `Position` struct types** in a new `crates/lending/` directory, add workspace member, basic property tests. ~2 days of work, foundation for everything else. Mirrors how `princeps-clob` and `princeps-funding` started.
+6. **ADR-009 (tokenomics + on-chain stake)** — explicitly reserved in [ADR-008](./../adr/008-pre-token-validator-policy.md) §4 and [ADR-010](./../adr/010-bad-debt-depletion-policy.md) §Forecloses. Supersedes Layer 2 (operator-cap commitment) and Layer 3's manual declaration gate at v3+. Drafting deferred until tokenomics design starts.
+7. **L-5 absolute liquidity bounds for socialization** — Layer 3's `socialize_residual` haircuts proportionally with no per-market cap. If a single-block oracle attack drives `unfilled` larger than depositors should plausibly absorb in one event, an additional cap (e.g., max 10% of `total_supplied` per declaration) would protect against operator-declaration abuse. Not a v0 blocker; revisit at v1 multi-asset onboarding when external depositors actually appear.
+8. **Precompile-level halt enforcement** — both the oracle circuit breaker (threat-model O-3) and the lending halt (Layer 1) currently short-circuit only the coordinator-driven loop. Precompile-level enforcement (revert on borrow/withdraw during halt) is the same single piece of plumbing for both: precompiles need to read coordinator state. v1 work; named in ADR-010 §Tradeoffs and the LendingHaltParams doc comment.
+
+## Suggested next action
+
+**Public-testnet deploy preparation** is the natural next step. Everything the v0 ship scope listed above is now landed end-to-end, including the post-Stage-24 hardening that this plan didn't originally schedule. The remaining items on the "What v0 ships" list — public testnet deploy with validators, monitoring, faucet — are deployment work, not protocol work. Plan that next.
