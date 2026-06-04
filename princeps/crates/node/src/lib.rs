@@ -61,6 +61,7 @@
 //! keeps each layer independently testable. The `bin/princeps` binary
 //! will own wiring of these two layers together.
 
+pub mod chain_history;
 pub mod operator;
 
 use std::collections::VecDeque;

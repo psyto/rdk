@@ -10,6 +10,7 @@ authors      = { workspace = true }
 [dependencies]
 princeps-consensus       = { workspace = true }
 princeps-lending         = { workspace = true }
+princeps-node            = { workspace = true }
 princeps-portfolio       = { workspace = true }
 rdk-types                = { workspace = true }
 rdk-clob                 = { workspace = true }

@@ -6873,6 +6873,7 @@ dependencies = [
  "eyre",
  "princeps-consensus",
  "princeps-lending",
+ "princeps-node",
  "princeps-portfolio",
  "rdk-clearing",
  "rdk-clob",

@@ -37,7 +37,6 @@
 //! (persistent across restarts, real network config, multi-validator)
 //! lands in Stage 13f.
 
-mod chain_history;
 mod socialize;
 
 use std::net::IpAddr;
@@ -2317,10 +2316,10 @@ fn run_socialize_subcommand(
 
     // Load (or create empty) chain-history store.
     let store = if chain_history_path.exists() {
-        let history = chain_history::load_from_path(&chain_history_path)?;
-        chain_history::ChainHistoryStore::from_history(history)?
+        let history = load_chain_history(&chain_history_path)?;
+        princeps_node::chain_history::ChainHistoryStore::from_history(history)?
     } else {
-        chain_history::ChainHistoryStore::empty()
+        princeps_node::chain_history::ChainHistoryStore::empty()
     };
 
     // Orchestrate verify → mutate → append.
@@ -2367,7 +2366,18 @@ fn resolve_chain_history_path(user: Option<&PathBuf>) -> eyre::Result<PathBuf> {
         .join("chain-history.json"))
 }
 
-fn save_chain_history(path: &Path, history: &chain_history::ChainHistory) -> eyre::Result<()> {
+fn load_chain_history(path: &Path) -> eyre::Result<princeps_node::chain_history::ChainHistory> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| eyre::eyre!("read {}: {e}", path.display()))?;
+    let history: princeps_node::chain_history::ChainHistory = serde_json::from_slice(&bytes)
+        .map_err(|e| eyre::eyre!("parse {}: {e}", path.display()))?;
+    Ok(history)
+}
+
+fn save_chain_history(
+    path: &Path,
+    history: &princeps_node::chain_history::ChainHistory,
+) -> eyre::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| eyre::eyre!("create_dir_all({}): {e}", parent.display()))?;

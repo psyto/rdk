@@ -30,10 +30,16 @@ use princeps_lending::{
     borrow as lending_position_borrow, compute_health_factor as lending_compute_health_factor,
     deposit_collateral as lending_position_deposit_collateral,
     repay as lending_position_repay,
+    socialize_residual as lending_socialize_residual,
     supply as lending_position_supply,
     withdraw_collateral as lending_position_withdraw_collateral,
     withdraw_supply as lending_position_withdraw_supply,
     Index as LendingIndex, Market, MarketId, Position,
+};
+use princeps_node::chain_history::{ChainEvent, ChainHistoryStore};
+use princeps_node::operator::{
+    verify_socialization_declaration, OperatorId, OperatorRegistry, OperatorSignature,
+    SocializationDeclaration,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{
@@ -192,6 +198,24 @@ pub const PRINCEPS_LENDING_HEALTH: Address =
 pub const PRINCEPS_LENDING_SUPPLY: Address =
     address!("0x0000000000000000000000000000000000000c25");
 
+/// `princeps_lending_socialize` precompile address — ADR-010 Layer 3
+/// EVM entrypoint. Companion to the `princeps socialize` CLI subcommand
+/// (`bd5b21b`); they share the orchestration shape but this is the
+/// production path that smart contracts can invoke.
+///
+/// Solidity call shape (192-byte input):
+/// `call(gas, 0x...0c27, calldata=(uint64 operator, uint32 market_id, uint128 unfilled, uint64 block_height, bytes64 signature), ...) → uint256 absorbed`
+///
+/// Returns the nominal amount actually socialized (low 16 bytes of u256),
+/// capped at the market's `total_supplied`. Zero on any rejection
+/// (unknown / invalid signature, market_id mismatch with installed
+/// state, market doesn't exist, no operator registry or chain history
+/// installed, malformed input). Mutates `market.supply_index` +
+/// `total_supplied`; appends a [`ChainEvent::Socialization`] to the
+/// installed [`ChainHistoryStore`] at `block_height`.
+pub const PRINCEPS_LENDING_SOCIALIZE: Address =
+    address!("0x0000000000000000000000000000000000000c27");
+
 /// `princeps_lending_withdraw_supply` precompile address (v1 multi-asset /
 /// scaled_supply work — follow-up to `b1b5981`).
 ///
@@ -324,6 +348,51 @@ pub fn install_lending_positions(
 /// Clear the installed positions map. Test-only typical use; idempotent.
 pub fn uninstall_lending_positions() {
     *POSITIONS_STATE.write().expect("POSITIONS_STATE rwlock poisoned") = None;
+}
+
+/// Process-global handle to the ADR-010 Layer 3 operator-key registry.
+/// Read-only after install — the registry is configured at boot from
+/// deployment config. Wrapped in `Arc` for cheap clone-into-handler;
+/// no outer mutex because no in-place mutation happens past install.
+static OPERATOR_REGISTRY: RwLock<Option<Arc<OperatorRegistry>>> = RwLock::new(None);
+
+/// Install the operator-key registry the socialize precompile
+/// consults during verify. Replaces any prior registry; idempotent
+/// for the same value.
+pub fn install_operator_registry(registry: Arc<OperatorRegistry>) {
+    *OPERATOR_REGISTRY
+        .write()
+        .expect("OPERATOR_REGISTRY rwlock poisoned") = Some(registry);
+}
+
+/// Clear the installed registry. Test-only typical use; idempotent.
+pub fn uninstall_operator_registry() {
+    *OPERATOR_REGISTRY
+        .write()
+        .expect("OPERATOR_REGISTRY rwlock poisoned") = None;
+}
+
+/// Process-global handle to the chain-history event log. The socialize
+/// precompile appends a [`ChainEvent::Socialization`] to it after a
+/// successful haircut. Other future event producers (forthcoming) can
+/// share the same store. Internally Mutex-guarded, so the outer
+/// wrapper is just an install/uninstall lifecycle handle.
+static CHAIN_HISTORY: RwLock<Option<Arc<ChainHistoryStore>>> = RwLock::new(None);
+
+/// Install the chain-history store. Same shared-Arc lifecycle as
+/// `OPERATOR_REGISTRY`.
+pub fn install_chain_history(store: Arc<ChainHistoryStore>) {
+    *CHAIN_HISTORY
+        .write()
+        .expect("CHAIN_HISTORY rwlock poisoned") = Some(store);
+}
+
+/// Clear the installed chain-history store. Test-only typical use;
+/// idempotent.
+pub fn uninstall_chain_history() {
+    *CHAIN_HISTORY
+        .write()
+        .expect("CHAIN_HISTORY rwlock poisoned") = None;
 }
 
 /// Read the currently-installed CLOB's best bid. Returns `None` if no CLOB
@@ -1276,6 +1345,133 @@ pub(crate) fn lending_withdraw_supply(
     ))
 }
 
+/// `princeps_lending_socialize` precompile handler — ADR-010 Layer 3
+/// EVM entrypoint.
+///
+/// Wires the three primitives that landed earlier:
+///   1. `verify_socialization_declaration` against the installed
+///      [`OperatorRegistry`].
+///   2. `socialize_residual` on the named market in [`MARKETS_STATE`].
+///   3. `append_event(block_height, ChainEvent::Socialization{..})`
+///      on the installed [`ChainHistoryStore`].
+///
+/// Input layout (192 bytes, big-endian throughout):
+///   [  0.. 32]  operator      (u32 in low 4 bytes of chunk)
+///   [ 32.. 64]  market_id     (u32)
+///   [ 64.. 96]  unfilled      (u128 in low 16)
+///   [ 96..128]  block_height  (u64 in low 8)
+///   [128..192]  signature     (64 raw bytes, r || s)
+///
+/// Returns 32 bytes — `absorbed` (u128 in low word) on success, zero
+/// on any rejection. Matches the existing precompile convention.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn lending_socialize(
+    input: &[u8],
+    _gas_limit: u64,
+    _reservoir: u64,
+) -> PrecompileResult {
+    let zero_result = || {
+        Ok(PrecompileOutput::new(
+            LENDING_BASE_GAS_COST,
+            Bytes::from(vec![0u8; 32]),
+            0,
+        ))
+    };
+
+    if input.len() < 192 {
+        return zero_result();
+    }
+
+    // Parse the declaration fields.
+    let operator = u32_from_be_chunk(&input[0..32]);
+    let market_id = u32_from_be_chunk(&input[32..64]);
+    let unfilled = u128_from_be_chunk(&input[64..96]);
+    let block_height = u64_from_be_chunk(&input[96..128]);
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes.copy_from_slice(&input[128..192]);
+    let declaration = SocializationDeclaration {
+        operator: OperatorId(operator),
+        market_id,
+        unfilled,
+        block_height,
+        signature: OperatorSignature(sig_bytes),
+    };
+
+    // Pull all four globals up-front. Drop the read handles before
+    // taking any write locks downstream.
+    let registry = {
+        let handle = OPERATOR_REGISTRY
+            .read()
+            .expect("OPERATOR_REGISTRY rwlock poisoned");
+        handle.as_ref().map(Arc::clone)
+    };
+    let Some(registry) = registry else {
+        return zero_result();
+    };
+
+    let chain_history = {
+        let handle = CHAIN_HISTORY
+            .read()
+            .expect("CHAIN_HISTORY rwlock poisoned");
+        handle.as_ref().map(Arc::clone)
+    };
+    let Some(chain_history) = chain_history else {
+        return zero_result();
+    };
+
+    let markets = {
+        let handle = MARKETS_STATE.read().expect("MARKETS_STATE rwlock poisoned");
+        handle.as_ref().map(Arc::clone)
+    };
+    let Some(markets) = markets else {
+        return zero_result();
+    };
+
+    // Verify operator-sig admission. Reject = zero.
+    if verify_socialization_declaration(&declaration, &registry).is_err() {
+        return zero_result();
+    }
+
+    // Apply the haircut.
+    let absorbed = {
+        let mut markets_guard = markets.lock().expect("markets mutex poisoned");
+        let Some(market) = markets_guard.get_mut(&MarketId(market_id)) else {
+            // Market doesn't exist on this chain.
+            drop(markets_guard);
+            return zero_result();
+        };
+        if market.id.0 != market_id {
+            // Defensive — shouldn't happen since the key is the same id.
+            drop(markets_guard);
+            return zero_result();
+        }
+        let Ok(report) = lending_socialize_residual(market, unfilled) else {
+            // ZeroUnfilled or NoSupply.
+            drop(markets_guard);
+            return zero_result();
+        };
+        report.absorbed
+    };
+
+    // Append the audit event. Use `absorbed` (the actual post-cap
+    // value), not the requested `unfilled` — the on-chain audit
+    // trail records what happened, not what was asked for.
+    chain_history.append_event(
+        block_height,
+        ChainEvent::Socialization {
+            market_id,
+            unfilled: absorbed,
+            declared_by: format!("operator-{operator}"),
+        },
+    );
+
+    Ok(PrecompileOutput::new(
+        LENDING_BASE_GAS_COST,
+        Bytes::from(u128_in_low_word(absorbed)),
+        0,
+    ))
+}
+
 /// `princeps_lending_liquidate` precompile handler (Stage 22b).
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn lending_liquidate(
@@ -1526,6 +1722,11 @@ pub fn princeps_precompiles(base: &Precompiles) -> Precompiles {
             PrecompileId::custom("princeps_lending_withdraw_supply"),
             PRINCEPS_LENDING_WITHDRAW_SUPPLY,
             lending_withdraw_supply,
+        ),
+        Precompile::new(
+            PrecompileId::custom("princeps_lending_socialize"),
+            PRINCEPS_LENDING_SOCIALIZE,
+            lending_socialize,
         ),
     ]);
     precompiles
@@ -2663,5 +2864,266 @@ mod tests {
 
         uninstall_lending_markets();
         uninstall_lending_positions();
+    }
+
+    // ─── socialize precompile (ADR-010 Layer 3 EVM entrypoint) ─────
+
+    use princeps_node::operator::demo_signing::{
+        demo_operator_key, demo_signing_key, sign_declaration as demo_sign_declaration,
+    };
+
+    fn encode_socialize_input(
+        operator: u32,
+        market_id: u32,
+        unfilled: u128,
+        block_height: u64,
+        sig: [u8; 64],
+    ) -> Vec<u8> {
+        let mut buf = vec![0u8; 192];
+        buf[28..32].copy_from_slice(&operator.to_be_bytes());
+        buf[60..64].copy_from_slice(&market_id.to_be_bytes());
+        buf[80..96].copy_from_slice(&unfilled.to_be_bytes());
+        buf[120..128].copy_from_slice(&block_height.to_be_bytes());
+        buf[128..192].copy_from_slice(&sig);
+        buf
+    }
+
+    fn install_socialize_globals(
+        operator: u32,
+        seed: u8,
+    ) -> (Arc<ChainHistoryStore>, Arc<OperatorRegistry>) {
+        let mut registry = OperatorRegistry::new();
+        registry.register(OperatorId(operator), demo_operator_key(seed));
+        let registry_arc = Arc::new(registry);
+        install_operator_registry(Arc::clone(&registry_arc));
+        let store_arc = Arc::new(ChainHistoryStore::empty());
+        install_chain_history(Arc::clone(&store_arc));
+        (store_arc, registry_arc)
+    }
+
+    fn signed_input(
+        operator: u32,
+        market_id: u32,
+        unfilled: u128,
+        block_height: u64,
+        seed: u8,
+    ) -> Vec<u8> {
+        let sk = demo_signing_key(seed);
+        let decl = demo_sign_declaration(
+            OperatorId(operator),
+            market_id,
+            unfilled,
+            block_height,
+            &sk,
+        );
+        encode_socialize_input(
+            operator,
+            market_id,
+            unfilled,
+            block_height,
+            decl.signature.0,
+        )
+    }
+
+    #[test]
+    fn lending_socialize_e2e_mutates_market_and_appends_event() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+
+        let (markets, _positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+
+        // Capture pre-state for the haircut conservation check.
+        let prior_supplied = markets
+            .lock()
+            .unwrap()
+            .get(&MarketId(0))
+            .unwrap()
+            .total_supplied;
+        let prior_index = markets
+            .lock()
+            .unwrap()
+            .get(&MarketId(0))
+            .unwrap()
+            .supply_index;
+
+        let (store, _registry) = install_socialize_globals(1, 1);
+
+        let input = signed_input(1, 0, 100, 42, 1);
+        let result = lending_socialize(&input, 100_000, 0).unwrap();
+        let absorbed = decode_u128_from_low_word(&result.bytes);
+        assert_eq!(absorbed, 100);
+
+        // Market state mutated.
+        let m = markets.lock().unwrap();
+        let market = m.get(&MarketId(0)).unwrap();
+        assert_eq!(market.total_supplied, prior_supplied - 100);
+        assert!(market.supply_index.0 < prior_index.0);
+        drop(m);
+
+        // Chain history populated at the declared block height.
+        let events = store.peek_at_height(42).expect("event recorded");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChainEvent::Socialization {
+                market_id,
+                unfilled,
+                declared_by,
+            } => {
+                assert_eq!(*market_id, 0);
+                assert_eq!(*unfilled, 100);
+                assert_eq!(declared_by, "operator-1");
+            }
+        }
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+    }
+
+    #[test]
+    fn lending_socialize_invalid_signature_returns_zero_no_mutation() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+
+        let (markets, _positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        let prior = markets
+            .lock()
+            .unwrap()
+            .get(&MarketId(0))
+            .unwrap()
+            .total_supplied;
+
+        // Registry has seed=1 for operator 1; signer uses seed=2 (wrong key).
+        let (store, _registry) = install_socialize_globals(1, 1);
+        let input = signed_input(1, 0, 100, 42, 2);
+        let result = lending_socialize(&input, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 0);
+
+        assert_eq!(
+            markets
+                .lock()
+                .unwrap()
+                .get(&MarketId(0))
+                .unwrap()
+                .total_supplied,
+            prior,
+        );
+        assert!(store.peek_at_height(42).is_none());
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+    }
+
+    #[test]
+    fn lending_socialize_no_registry_returns_zero() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+
+        let (markets, _positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        // Chain history installed but NOT registry.
+        install_chain_history(Arc::new(ChainHistoryStore::empty()));
+
+        let input = signed_input(1, 0, 100, 42, 1);
+        let result = lending_socialize(&input, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 0);
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_chain_history();
+    }
+
+    #[test]
+    fn lending_socialize_unknown_market_returns_zero() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+
+        let (markets, _positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        let (store, _registry) = install_socialize_globals(1, 1);
+
+        // Declaration cites market 99, registry has the right key for it.
+        let input = signed_input(1, 99, 100, 42, 1);
+        let result = lending_socialize(&input, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 0);
+        assert!(store.peek_at_height(42).is_none());
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+    }
+
+    #[test]
+    fn lending_socialize_short_input_returns_zero() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let short = vec![0u8; 64]; // need 192
+        let result = lending_socialize(&short, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 0);
+    }
+
+    #[test]
+    fn lending_socialize_caps_at_total_supplied() {
+        let _g = TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
+
+        let (markets, _positions) = make_test_lending_market();
+        install_lending_markets(Arc::clone(&markets));
+        // Shrink the market to a small total_supplied so we can verify
+        // the cap-at-total behavior easily.
+        {
+            let mut m = markets.lock().unwrap();
+            let market = m.get_mut(&MarketId(0)).unwrap();
+            market.total_supplied = 200;
+            market.total_borrowed = 0;
+        }
+        let (store, _registry) = install_socialize_globals(1, 1);
+
+        // Request 10_000 against a market with only 200 — absorbed
+        // caps at 200; chain-history event records 200, not 10_000.
+        let input = signed_input(1, 0, 10_000, 42, 1);
+        let result = lending_socialize(&input, 100_000, 0).unwrap();
+        assert_eq!(decode_u128_from_low_word(&result.bytes), 200);
+        let events = store.peek_at_height(42).expect("event recorded");
+        match &events[0] {
+            ChainEvent::Socialization { unfilled, .. } => assert_eq!(*unfilled, 200),
+        }
+
+        uninstall_lending_markets();
+        uninstall_lending_positions();
+        uninstall_operator_registry();
+        uninstall_chain_history();
     }
 }

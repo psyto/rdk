@@ -1,8 +1,3 @@
-// bin-crate `unreachable_pub` triggers on every public item in this
-// module since `princeps` has no library surface — same pattern as
-// openhl's chain_history.rs. Silence at the module level.
-#![allow(unreachable_pub)]
-
 //! Per-block event log: runtime-append + boot-time replay.
 //!
 //! ADR-010's [Layer 3 deferral note](../../docs/adr/010-bad-debt-depletion-policy.md)
@@ -38,10 +33,29 @@
 //! [`Socialization`]: ChainEvent::Socialization
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::fmt;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+
+/// Errors from constructing a [`ChainHistoryStore`] from a
+/// [`ChainHistory`]. Only one variant today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainHistoryError {
+    /// The wire form listed the same `height` twice. Mirrors openhl's
+    /// `chain_history.rs` invariant.
+    DuplicateHeight(u64),
+}
+
+impl fmt::Display for ChainHistoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateHeight(h) => write!(f, "chain history: duplicate block height entry: {h}"),
+        }
+    }
+}
+
+impl std::error::Error for ChainHistoryError {}
 
 /// One event in chain history. Add new variants at the end of the
 /// enum; older snapshots/files keep decoding because the serde tag
@@ -130,13 +144,11 @@ impl ChainHistoryStore {
     /// loading from a file OR when restoring from a snapshot.
     /// Rejects duplicate heights — the JSON shouldn't list block 7
     /// twice, mirroring openhl's invariant.
-    pub fn from_history(history: ChainHistory) -> eyre::Result<Self> {
+    pub fn from_history(history: ChainHistory) -> Result<Self, ChainHistoryError> {
         let mut by_height: BTreeMap<u64, Vec<ChainEvent>> = BTreeMap::new();
         for b in history.blocks {
             if by_height.contains_key(&b.height) {
-                return Err(eyre::eyre!(
-                    "chain history: duplicate block height entry",
-                ));
+                return Err(ChainHistoryError::DuplicateHeight(b.height));
             }
             by_height.insert(b.height, b.events);
         }
@@ -253,16 +265,6 @@ impl ChainHistoryStore {
             .collect();
         ChainHistory { blocks }
     }
-}
-
-/// Parse a chain-history file from a path. For boot-time
-/// load-and-replay; mirrors openhl's `load_from_path`.
-pub fn load_from_path(path: &Path) -> eyre::Result<ChainHistory> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| eyre::eyre!("chain history {}: {e}", path.display()))?;
-    let history: ChainHistory = serde_json::from_slice(&bytes)
-        .map_err(|e| eyre::eyre!("chain history {} parse: {e}", path.display()))?;
-    Ok(history)
 }
 
 #[cfg(test)]
@@ -481,38 +483,6 @@ mod tests {
         assert_eq!(evs_at_5.len(), 1);
         let evs_at_7 = restored.peek_at_height(7).expect("h=7 present");
         assert_eq!(evs_at_7.len(), 2);
-    }
-
-    // ─── load_from_path round-trip ─────────────────────────────────
-
-    #[test]
-    fn load_from_path_round_trips_through_a_file() {
-        // Write a small ChainHistory to a temp file, load it back,
-        // construct a store, confirm shape.
-        use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().expect("temp file");
-        let original = ChainHistory {
-            blocks: vec![HistoryBlock {
-                height: 42,
-                events: vec![ChainEvent::Socialization {
-                    market_id: 1,
-                    unfilled: 9_999,
-                    declared_by: "op-load".to_string(),
-                }],
-            }],
-        };
-        let bytes = serde_json::to_vec(&original).expect("serialize");
-        f.write_all(&bytes).expect("write");
-        f.flush().expect("flush");
-
-        let loaded = load_from_path(f.path()).expect("load");
-        assert_eq!(loaded.blocks.len(), 1);
-        assert_eq!(loaded.blocks[0].height, 42);
-        assert_eq!(loaded.blocks[0].events.len(), 1);
-
-        let store = ChainHistoryStore::from_history(loaded).expect("construct");
-        let evs = store.peek_at_height(42).expect("event present");
-        assert_eq!(evs.len(), 1);
     }
 
     #[test]

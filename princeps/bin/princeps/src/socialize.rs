@@ -10,7 +10,7 @@
 //!   2. `princeps_lending::socialization::socialize_residual` —
 //!      applies the supply_index haircut to the market, returns a
 //!      [`SocializationReport`].
-//!   3. `crate::chain_history::ChainHistoryStore::append_event` —
+//!   3. `princeps_node::chain_history::ChainHistoryStore::append_event` —
 //!      records the resulting [`ChainEvent::Socialization`] at the
 //!      declaration's `block_height` for audit + restart-replay.
 //!
@@ -25,7 +25,7 @@ use princeps_node::operator::{
     verify_socialization_declaration, OperatorRegistry, SocializationDeclaration,
 };
 
-use crate::chain_history::{ChainEvent, ChainHistoryStore};
+use princeps_node::chain_history::{ChainEvent, ChainHistoryStore};
 
 /// Run the Layer 3 orchestration end-to-end against a single market.
 ///
