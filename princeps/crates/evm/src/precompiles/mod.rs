@@ -904,7 +904,7 @@ fn u128_in_low_word(v: u128) -> Vec<u8> {
 
 /// `princeps_lending_deposit_collateral` precompile handler (Stage 21a).
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_deposit(
+pub fn lending_deposit(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -968,7 +968,7 @@ pub(crate) fn lending_deposit(
 
 /// `princeps_lending_borrow` precompile handler (Stage 21b).
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_borrow(
+pub fn lending_borrow(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -1059,7 +1059,7 @@ pub(crate) fn lending_borrow(
 
 /// `princeps_lending_repay` precompile handler (Stage 21c).
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_repay(
+pub fn lending_repay(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -1125,7 +1125,7 @@ pub(crate) fn lending_repay(
 
 /// `princeps_lending_withdraw_collateral` precompile handler (Stage 21d).
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_withdraw(
+pub fn lending_withdraw(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -1210,7 +1210,7 @@ pub(crate) fn lending_withdraw(
 /// state. The bridge-owned implicit pool continues to provide initial
 /// liquidity in parallel (`b1b5981`'s additive model).
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_supply(
+pub fn lending_supply(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -1291,7 +1291,7 @@ pub(crate) fn lending_supply(
 /// supplier-side analog to a position falling below the health-factor
 /// threshold on the borrower side.
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_withdraw_supply(
+pub fn lending_withdraw_supply(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -1400,7 +1400,7 @@ pub(crate) fn lending_withdraw_supply(
 /// Returns 32 bytes — `absorbed` (u128 in low word) on success, zero
 /// on any rejection. Matches the existing precompile convention.
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_socialize(
+pub fn lending_socialize(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -1509,7 +1509,7 @@ pub(crate) fn lending_socialize(
 
 /// `princeps_lending_liquidate` precompile handler (Stage 22b).
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_liquidate(
+pub fn lending_liquidate(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
@@ -1625,7 +1625,7 @@ pub(crate) fn lending_liquidate(
 
 /// `princeps_lending_health` precompile handler (Stage 21e). Read-only.
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn lending_health(
+pub fn lending_health(
     input: &[u8],
     _gas_limit: u64,
     _reservoir: u64,
