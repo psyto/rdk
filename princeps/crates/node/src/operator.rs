@@ -151,7 +151,7 @@ pub struct SocializationDeclaration {
 
 impl SocializationDeclaration {
     /// Construct a declaration with [`OperatorSignature::ZERO`] — the
-    /// pre-signing shape used by [`test_signing::sign_declaration`]
+    /// pre-signing shape used by [`demo_signing::sign_declaration`]
     /// and any production signer.
     #[must_use]
     pub const fn unsigned(
@@ -245,27 +245,40 @@ pub fn verify_socialization_declaration(
     Ok(declaration.operator)
 }
 
-#[cfg(test)]
-pub(crate) mod test_signing {
-    //! Test-only signing helpers. Operators run external code; the
-    //! node only needs to verify, never sign — but tests need to
-    //! produce authentic signed declarations to exercise verify.
-    //! Same pattern as `rdk_oracle::verify::test_signing`.
-
+/// Deterministic in-process signing helpers for **dev / demo / test
+/// paths only** — never use in production.
+///
+/// Production deployments sign declarations off-band (operators run
+/// external signing infrastructure; the node only verifies). These
+/// helpers exist so the v0 CLI demo path (`princeps socialize`),
+/// integration tests, and the operator-module unit tests can build
+/// + sign authentic declarations in-process.
+///
+/// Same pattern as `rdk_oracle::verify::test_signing`, but exposed
+/// publicly because the bin's `socialize` subcommand needs an
+/// end-to-end demo flow that includes signing.
+pub mod demo_signing {
     use super::{OperatorId, OperatorKey, OperatorSignature, SocializationDeclaration};
     use k256::ecdsa::{signature::Signer, SigningKey};
 
     /// Build a deterministic [`SigningKey`] from a 1..=255 seed.
-    pub(crate) fn test_signing_key(seed: u8) -> SigningKey {
-        assert!(seed != 0, "test_signing_key seed must be non-zero");
+    /// Same seed always yields the same secp256k1 keypair, so demo
+    /// flows can register the corresponding [`OperatorKey`] and then
+    /// produce signatures that verify.
+    #[must_use]
+    pub fn demo_signing_key(seed: u8) -> SigningKey {
+        assert!(seed != 0, "demo_signing_key seed must be non-zero");
         let bytes = [seed; 32];
         SigningKey::from_slice(&bytes).expect("seed bytes form a valid secp256k1 scalar")
     }
 
-    /// Compute the SEC1-compressed public key (33 bytes) for a test
-    /// signing key.
-    pub(crate) fn test_operator_key(seed: u8) -> OperatorKey {
-        let sk = test_signing_key(seed);
+    /// Compute the SEC1-compressed public key (33 bytes) for a
+    /// demo signing key. Register this against an `OperatorId` in
+    /// the registry; declarations signed with the matching
+    /// [`demo_signing_key`] of the same seed will verify.
+    #[must_use]
+    pub fn demo_operator_key(seed: u8) -> OperatorKey {
+        let sk = demo_signing_key(seed);
         let vk = sk.verifying_key();
         let compressed = vk.to_encoded_point(true);
         let bytes = compressed.as_bytes();
@@ -276,7 +289,8 @@ pub(crate) mod test_signing {
 
     /// Sign a fresh declaration with the given signing key. Returns
     /// the declaration with the `signature` field populated.
-    pub(crate) fn sign_declaration(
+    #[must_use]
+    pub fn sign_declaration(
         operator: OperatorId,
         market_id: u32,
         unfilled: u128,
@@ -299,12 +313,12 @@ pub(crate) mod test_signing {
 
 #[cfg(test)]
 mod tests {
-    use super::test_signing::{sign_declaration, test_operator_key, test_signing_key};
+    use super::demo_signing::{demo_operator_key, demo_signing_key, sign_declaration};
     use super::*;
 
     fn registry_with_operator(seed: u8, id: OperatorId) -> OperatorRegistry {
         let mut r = OperatorRegistry::new();
-        r.register(id, test_operator_key(seed));
+        r.register(id, demo_operator_key(seed));
         r
     }
 
@@ -312,7 +326,7 @@ mod tests {
 
     #[test]
     fn round_trip_verifies() {
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let registry = registry_with_operator(1, OperatorId(7));
         let decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         let verified = verify_socialization_declaration(&decl, &registry).expect("verifies");
@@ -323,7 +337,7 @@ mod tests {
 
     #[test]
     fn tampered_market_id_rejected() {
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let registry = registry_with_operator(1, OperatorId(7));
         let mut decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         decl.market_id = 999;
@@ -334,7 +348,7 @@ mod tests {
 
     #[test]
     fn tampered_unfilled_rejected() {
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let registry = registry_with_operator(1, OperatorId(7));
         let mut decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         decl.unfilled = 5_001;
@@ -345,7 +359,7 @@ mod tests {
 
     #[test]
     fn tampered_block_height_rejected() {
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let registry = registry_with_operator(1, OperatorId(7));
         let mut decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         decl.block_height = 9_999;
@@ -356,7 +370,7 @@ mod tests {
 
     #[test]
     fn tampered_operator_id_rejected_as_unknown_when_not_registered() {
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let registry = registry_with_operator(1, OperatorId(7));
         let mut decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         decl.operator = OperatorId(8);
@@ -370,10 +384,10 @@ mod tests {
         // Operator 7 signs, but the declaration claims operator 8.
         // Operator 8 IS registered with a different key, so we hit the
         // InvalidSignature branch rather than UnknownOperator.
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let mut registry = OperatorRegistry::new();
-        registry.register(OperatorId(7), test_operator_key(1));
-        registry.register(OperatorId(8), test_operator_key(2));
+        registry.register(OperatorId(7), demo_operator_key(1));
+        registry.register(OperatorId(8), demo_operator_key(2));
         let mut decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         decl.operator = OperatorId(8);
         let err =
@@ -385,10 +399,10 @@ mod tests {
 
     #[test]
     fn wrong_pubkey_rejected() {
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         // Registry has operator 7 keyed to seed=2, but signer uses seed=1.
         let mut registry = OperatorRegistry::new();
-        registry.register(OperatorId(7), test_operator_key(2));
+        registry.register(OperatorId(7), demo_operator_key(2));
         let decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         let err =
             verify_socialization_declaration(&decl, &registry).expect_err("wrong key rejected");
@@ -397,7 +411,7 @@ mod tests {
 
     #[test]
     fn malformed_pubkey_rejected() {
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let mut registry = OperatorRegistry::new();
         registry.register(OperatorId(7), OperatorKey([0xFF; 33]));
         let decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
@@ -436,7 +450,7 @@ mod tests {
         // Empty registry → any declaration is UnknownOperator, never
         // InvalidSignature, regardless of signature bytes.
         let registry = OperatorRegistry::new();
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let decl = sign_declaration(OperatorId(7), 0, 5_000, 1_234, &sk);
         let err = verify_socialization_declaration(&decl, &registry)
             .expect_err("unknown operator");
@@ -448,8 +462,8 @@ mod tests {
     #[test]
     fn registry_register_is_idempotent_then_rotation() {
         let mut registry = OperatorRegistry::new();
-        let k1 = test_operator_key(1);
-        let k2 = test_operator_key(2);
+        let k1 = demo_operator_key(1);
+        let k2 = demo_operator_key(2);
         registry.register(OperatorId(0), k1);
         registry.register(OperatorId(0), k1); // idempotent
         assert_eq!(registry.len(), 1);
@@ -459,7 +473,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.get(OperatorId(0)), Some(&k2));
         // Signing with prior key now fails to verify.
-        let sk1 = test_signing_key(1);
+        let sk1 = demo_signing_key(1);
         let decl = sign_declaration(OperatorId(0), 0, 100, 1, &sk1);
         let err = verify_socialization_declaration(&decl, &registry)
             .expect_err("rotated-away key rejected");
@@ -469,9 +483,9 @@ mod tests {
     #[test]
     fn registry_iter_returns_in_id_order() {
         let mut registry = OperatorRegistry::new();
-        registry.register(OperatorId(3), test_operator_key(3));
-        registry.register(OperatorId(1), test_operator_key(1));
-        registry.register(OperatorId(2), test_operator_key(2));
+        registry.register(OperatorId(3), demo_operator_key(3));
+        registry.register(OperatorId(1), demo_operator_key(1));
+        registry.register(OperatorId(2), demo_operator_key(2));
         let ids: Vec<u32> = registry.iter().map(|(id, _)| id.0).collect();
         assert_eq!(ids, vec![1, 2, 3]);
     }
@@ -483,7 +497,7 @@ mod tests {
         // Operator signs a declaration for height 100. An adversary
         // captures it and tries to replay at height 200 — same other
         // fields, different height, signature no longer verifies.
-        let sk = test_signing_key(1);
+        let sk = demo_signing_key(1);
         let registry = registry_with_operator(1, OperatorId(7));
         let decl_100 = sign_declaration(OperatorId(7), 0, 5_000, 100, &sk);
         assert!(verify_socialization_declaration(&decl_100, &registry).is_ok());

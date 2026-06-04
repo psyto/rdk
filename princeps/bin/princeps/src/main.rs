@@ -38,6 +38,7 @@
 //! lands in Stage 13f.
 
 mod chain_history;
+mod socialize;
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -128,6 +129,66 @@ enum Command {
     Lending {
         #[command(subcommand)]
         action: LendingCommand,
+    },
+
+    /// ADR-010 Layer 3: apply a signed operator declaration that
+    /// socializes residual bad debt across depositors. Loads the
+    /// lending sandbox state, verifies the operator signature against
+    /// a registry seeded with the supplied operator key, applies the
+    /// `supply_index` haircut to the market, appends a Socialization
+    /// event to the chain-history log, and saves both back.
+    ///
+    /// At v0 the operator key is derived deterministically from
+    /// `--signing-key-seed`; a real deployment would load it from a
+    /// keystore and sign off-band.
+    ///
+    /// Examples:
+    ///   princeps socialize --unfilled 500 --block-height 100
+    ///   princeps socialize --operator 1 --unfilled 200 --block-height 7 \
+    ///     --signing-key-seed 1 --declared-by operator-A
+    Socialize {
+        /// OperatorId for the declaration. Default 1.
+        #[arg(long, default_value_t = 1)]
+        operator: u32,
+
+        /// MarketId the declaration applies to. Default 0 (the v0
+        /// USDC/ETH market).
+        #[arg(long, default_value_t = 0)]
+        market: u32,
+
+        /// Nominal residual to socialize. Must be > 0.
+        #[arg(long)]
+        unfilled: u128,
+
+        /// Block height the declaration is bound to (replay
+        /// protection). Default 1.
+        #[arg(long, default_value_t = 1)]
+        block_height: u64,
+
+        /// Seed for the deterministic test signing key (1..=255). At
+        /// v0 the same seed deterministically yields the same
+        /// secp256k1 keypair, so the registry is keyed against the
+        /// derived public key. Real deployments swap this for a
+        /// keystore loader.
+        #[arg(long, default_value_t = 1)]
+        signing_key_seed: u8,
+
+        /// Short human-readable label recorded on the chain-history
+        /// event. Informational; not load-bearing on consensus.
+        #[arg(long, default_value = "operator-1")]
+        declared_by: String,
+
+        /// Override path for the lending sandbox state file. Default
+        /// `$HOME/.princeps/lending-state.json` (same as the
+        /// `princeps lending` subcommands).
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+
+        /// Override path for the chain-history file. Default
+        /// `$HOME/.princeps/chain-history.json`. Created if missing;
+        /// appended-to if present.
+        #[arg(long)]
+        chain_history_file: Option<PathBuf>,
     },
 
     /// Drive consensus decisions through Reth-backed `LiveRethEvmBridge` +
@@ -325,6 +386,25 @@ fn main() -> eyre::Result<()> {
         Command::Devnet { rounds } => tokio_rt()?.block_on(run_devnet(rounds)),
         Command::LendingDemo { eth_crash_price } => run_lending_demo(eth_crash_price),
         Command::Lending { action } => run_lending_subcommand(action),
+        Command::Socialize {
+            operator,
+            market,
+            unfilled,
+            block_height,
+            signing_key_seed,
+            declared_by,
+            state_file,
+            chain_history_file,
+        } => run_socialize_subcommand(
+            operator,
+            market,
+            unfilled,
+            block_height,
+            signing_key_seed,
+            declared_by,
+            state_file,
+            chain_history_file,
+        ),
         Command::RethDevnet {
             rounds,
             moniker,
@@ -1901,7 +1981,7 @@ fn wallclock_secs() -> u64 {
 /// oracle relies on.
 ///
 /// The seed byte is repeated 32 times to form the secp256k1 secret
-/// scalar; this is the same trick the oracle's `test_signing_key`
+/// scalar; this is the same trick the oracle's `demo_signing_key`
 /// helper uses internally, lifted into the binary so the bridge-
 /// simulator code stays out of the oracle crate's production
 /// surface.
@@ -2174,4 +2254,127 @@ fn print_tick_report(report: &TickReport) {
         "vault(shares={}, assets={}, price_bps={:?})",
         report.vault_total_shares, report.vault_total_assets, report.vault_share_price_bps
     );
+}
+
+// ============================================================
+// ADR-010 Layer 3 — `princeps socialize` subcommand
+// ============================================================
+
+#[allow(clippy::too_many_arguments)]
+fn run_socialize_subcommand(
+    operator: u32,
+    market: u32,
+    unfilled: u128,
+    block_height: u64,
+    signing_key_seed: u8,
+    declared_by: String,
+    state_file: Option<PathBuf>,
+    chain_history_file: Option<PathBuf>,
+) -> eyre::Result<()> {
+    use princeps_node::operator::{
+        demo_signing::{demo_operator_key, demo_signing_key, sign_declaration},
+        OperatorId, OperatorRegistry,
+    };
+
+    // Resolve paths (defaults under ~/.princeps/, matching the lending
+    // sandbox's conventions).
+    let state_path = resolve_lending_state_path(state_file.as_ref())?;
+    let chain_history_path = resolve_chain_history_path(chain_history_file.as_ref())?;
+
+    // Load the lending sandbox state. Mirrors the lending subcommand's
+    // hint: surface a friendly error pointing the user at `init`.
+    let mut state = load_lending_state(&state_path).map_err(|e| {
+        eyre::eyre!("{e}\n  hint: run `princeps lending init` first to create the sandbox.")
+    })?;
+
+    // Build the operator registry from the supplied signing seed.
+    // v0 demo path — the registry is rebuilt fresh from the seed each
+    // run; a real deployment loads it from the deployment config.
+    let signing_key = demo_signing_key(signing_key_seed);
+    let mut registry = OperatorRegistry::new();
+    registry.register(OperatorId(operator), demo_operator_key(signing_key_seed));
+
+    // Build + sign the declaration in-process. A production signer
+    // runs off-band; this is the demo / single-host convenience path.
+    let declaration = sign_declaration(
+        OperatorId(operator),
+        market,
+        unfilled,
+        block_height,
+        &signing_key,
+    );
+
+    // Sanity: the loaded state's market must match the declaration's
+    // market_id. (Orchestrator also catches this, but a clearer
+    // up-front error helps the v0 user with a typo.)
+    if state.market.id.0 != market {
+        return Err(eyre::eyre!(
+            "loaded state's market id is {} but --market is {}",
+            state.market.id.0,
+            market,
+        ));
+    }
+
+    // Load (or create empty) chain-history store.
+    let store = if chain_history_path.exists() {
+        let history = chain_history::load_from_path(&chain_history_path)?;
+        chain_history::ChainHistoryStore::from_history(history)?
+    } else {
+        chain_history::ChainHistoryStore::empty()
+    };
+
+    // Orchestrate verify → mutate → append.
+    let report = socialize::run_socialization(
+        declaration,
+        &registry,
+        &mut state.market,
+        &store,
+        &declared_by,
+    )?;
+
+    // Persist both files.
+    save_lending_state(&state_path, &state)?;
+    save_chain_history(&chain_history_path, &store.snapshot())?;
+
+    // Audit-friendly summary.
+    println!("Layer 3 socialization applied:");
+    println!("  operator             = {operator}");
+    println!("  market               = {market}");
+    println!("  block_height         = {block_height}");
+    println!("  requested_unfilled   = {}", report.requested_unfilled);
+    println!("  actually_absorbed    = {}", report.absorbed);
+    println!(
+        "  total_supplied       = {} → {}",
+        report.prior_total_supplied, report.new_total_supplied,
+    );
+    println!(
+        "  supply_index         = {} → {}",
+        report.prior_supply_index.0, report.new_supply_index.0,
+    );
+    println!("  state_file           = {}", state_path.display());
+    println!("  chain_history_file   = {}", chain_history_path.display());
+    Ok(())
+}
+
+fn resolve_chain_history_path(user: Option<&PathBuf>) -> eyre::Result<PathBuf> {
+    if let Some(p) = user {
+        return Ok(p.clone());
+    }
+    let home = std::env::var("HOME")
+        .map_err(|_| eyre::eyre!("--chain-history-file not supplied and $HOME is not set"))?;
+    Ok(PathBuf::from(home)
+        .join(".princeps")
+        .join("chain-history.json"))
+}
+
+fn save_chain_history(path: &Path, history: &chain_history::ChainHistory) -> eyre::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| eyre::eyre!("create_dir_all({}): {e}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(history)
+        .map_err(|e| eyre::eyre!("serialize chain history: {e}"))?;
+    std::fs::write(path, bytes)
+        .map_err(|e| eyre::eyre!("write {}: {e}", path.display()))?;
+    Ok(())
 }
