@@ -37,6 +37,7 @@
 //! (persistent across restarts, real network config, multi-validator)
 //! lands in Stage 13f.
 
+mod genesis;
 mod socialize;
 
 use std::net::IpAddr;
