@@ -1,0 +1,96 @@
+{
+  "_comment": [
+    "Princeps devnet genesis — mirrors seed_v0_lending_markets +",
+    "seed_v0_demo_accounts exactly. Loaded when reth-devnet is invoked",
+    "with --reth-genesis-file=princeps/genesis/devnet-genesis.json.",
+    "Without that flag, boot falls back to the hardcoded seed functions",
+    "and the on-disk state is identical (pinned by the unit test",
+    "`devnet_genesis_market_matches_seed_v0`).",
+    "",
+    "Validator/publisher/operator entries are placeholders — devnet",
+    "still derives those from --validators / --reth-operator-* flags",
+    "until T1c-b reconciles the two paths."
+  ],
+  "chain_id": 1,
+  "validators": [
+    {
+      "moniker": "alice",
+      "pubkey_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "voting_power": 1
+    }
+  ],
+  "oracle_publishers": [
+    {
+      "feed_id": 0,
+      "label": "devnet-eth-feed",
+      "pubkey_hex": "020000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "operators": [
+    {
+      "operator_id": 1,
+      "label": "devnet-op",
+      "pubkey_hex": "020000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "markets": [
+    {
+      "market_id": 0,
+      "label": "USDC-ETH",
+      "underlying_asset_id": 1,
+      "collateral_asset_id": 0,
+      "irm": {
+        "base_rate_per_block": "0",
+        "slope_below_kink_per_block": "100000000000000000000000",
+        "slope_above_kink_per_block": "1000000000000000000000000",
+        "kink_bps": 8000
+      },
+      "liquidation_threshold_bps": 9500,
+      "liquidation_bonus_bps": 500,
+      "reserve_factor_bps": 1000,
+      "initial_total_supplied": "1000000"
+    }
+  ],
+  "demo_accounts": [
+    {
+      "account_id": 1,
+      "market_id": 0,
+      "collateral": "1000",
+      "borrow": "200",
+      "seed_price_collateral": "1",
+      "seed_price_underlying": "1"
+    },
+    {
+      "account_id": 2,
+      "market_id": 0,
+      "collateral": "500",
+      "borrow": "300",
+      "seed_price_collateral": "1",
+      "seed_price_underlying": "1"
+    },
+    {
+      "account_id": 3,
+      "market_id": 0,
+      "collateral": "200",
+      "borrow": "150",
+      "seed_price_collateral": "1",
+      "seed_price_underlying": "1"
+    },
+    {
+      "account_id": 4,
+      "market_id": 0,
+      "collateral": "100",
+      "borrow": "90",
+      "seed_price_collateral": "1",
+      "seed_price_underlying": "1"
+    },
+    {
+      "account_id": 5,
+      "market_id": 0,
+      "collateral": "80",
+      "borrow": "70",
+      "seed_price_collateral": "1",
+      "seed_price_underlying": "1"
+    }
+  ]
+}

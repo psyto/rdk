@@ -300,6 +300,18 @@ enum Command {
         /// audit history survives across runs.
         #[arg(long)]
         reth_chain_history_file: Option<PathBuf>,
+
+        /// Stage T1b/c — princeps-side genesis file. When supplied on a
+        /// fresh chain, the bridge's lending markets and demo accounts
+        /// are seeded from this file via `genesis::apply_to_bridge`.
+        /// When omitted, the hardcoded `seed_v0_*` functions run
+        /// instead — both paths produce byte-identical state when the
+        /// file is `princeps/genesis/devnet-genesis.json` (pinned by
+        /// the `devnet_genesis_market_matches_seed_v0` unit test).
+        /// Ignored on restart (markets restore from the bridge
+        /// snapshot exactly like the hardcoded path).
+        #[arg(long)]
+        reth_genesis_file: Option<PathBuf>,
     },
 }
 
@@ -460,6 +472,7 @@ fn main() -> eyre::Result<()> {
             reth_operator_id,
             reth_operator_signing_key_seed,
             reth_chain_history_file,
+            reth_genesis_file,
         } => tokio_rt()?.block_on(run_reth_devnet(
             rounds,
             moniker,
@@ -471,6 +484,7 @@ fn main() -> eyre::Result<()> {
             reth_operator_id,
             reth_operator_signing_key_seed,
             reth_chain_history_file,
+            reth_genesis_file,
         )),
     }
 }
@@ -1103,6 +1117,7 @@ async fn run_reth_devnet(
     operator_id: u32,
     operator_signing_key_seed: u8,
     chain_history_file: Option<PathBuf>,
+    genesis_file: Option<PathBuf>,
 ) -> eyre::Result<()> {
     println!(
         "princeps v{} — driving {} reth-backed decision{}",
@@ -1228,16 +1243,33 @@ async fn run_reth_devnet(
         (None, 0)
     };
 
-    // Stage 24a — on a fresh chain, register the v0 USDC/ETH lending
-    // market and seed 5 demo accounts borrowing ETH at varying
-    // leverage. On restart, markets + positions are restored from the
-    // bridge snapshot so we deliberately skip this to avoid
-    // double-seeding (which would panic on the second `lending_borrow`
-    // against the same account).
+    // Stage 24a / T1c — on a fresh chain, register lending markets
+    // and seed demo borrower positions. On restart, markets + positions
+    // are restored from the bridge snapshot so we deliberately skip
+    // this to avoid double-seeding (the second `lending_borrow`
+    // against an existing account would panic).
+    //
+    // Source-of-truth selection:
+    //   --reth-genesis-file <path>  → load PrincepsGenesis, apply it
+    //   (no flag)                   → call seed_v0_* (hardcoded, legacy)
+    // Both paths produce byte-identical bridge state when the file is
+    // `princeps/genesis/devnet-genesis.json` — pinned by the unit test
+    // `genesis::tests::devnet_genesis_market_matches_seed_v0`.
     if resume_parent.is_none() {
-        seed_v0_lending_markets(bridge.as_ref());
-        seed_v0_demo_accounts(bridge.as_ref());
-        println!("      lending genesis  = USDC/ETH market + 5 demo accounts seeded");
+        if let Some(path) = genesis_file.as_deref() {
+            let g = genesis::PrincepsGenesis::load(path)?;
+            genesis::apply_to_bridge(&g, bridge.as_ref())?;
+            println!(
+                "      lending genesis  = loaded from {} ({} market(s), {} demo account(s))",
+                path.display(),
+                g.markets.len(),
+                g.demo_accounts.len(),
+            );
+        } else {
+            seed_v0_lending_markets(bridge.as_ref());
+            seed_v0_demo_accounts(bridge.as_ref());
+            println!("      lending genesis  = USDC/ETH market + 5 demo accounts seeded");
+        }
     }
 
     // ADR-010 Layer 3 — install the operator-key registry + chain-history

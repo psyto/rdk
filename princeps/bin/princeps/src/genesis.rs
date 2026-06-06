@@ -36,6 +36,10 @@
 
 use std::path::Path;
 
+use princeps_evm::LiveRethEvmBridge;
+use princeps_lending::{AssetId, Bps, IrmParams, Market, MarketId};
+use rdk_clearing::Account;
+use rdk_clob::AccountId as LendingAccountId;
 use serde::{Deserialize, Serialize};
 
 /// Top-level on-disk genesis. One file per chain.
@@ -170,6 +174,101 @@ impl PrincepsGenesis {
     }
 }
 
+impl GenesisMarket {
+    /// Convert into the runtime `princeps_lending::Market` shape that
+    /// the bridge owns. Mirrors the parameters
+    /// `seed_v0_lending_markets` passes into `Market::new` today, with
+    /// the u128 string fields parsed back to numbers.
+    ///
+    /// `at_block` is the starting block for `last_accrual_block` —
+    /// callers typically pass `0` on a fresh chain, matching the
+    /// existing seed code.
+    pub(crate) fn build(&self, at_block: u64) -> eyre::Result<Market> {
+        let parse_u128 = |s: &str, field: &str| -> eyre::Result<u128> {
+            s.parse()
+                .map_err(|e| eyre::eyre!("market {} {field}: {e}", self.market_id))
+        };
+        let mut m = Market::new(
+            MarketId(self.market_id),
+            AssetId(self.underlying_asset_id),
+            AssetId(self.collateral_asset_id),
+            IrmParams {
+                base_rate_per_block: parse_u128(&self.irm.base_rate_per_block, "base_rate_per_block")?,
+                slope_below_kink_per_block: parse_u128(
+                    &self.irm.slope_below_kink_per_block,
+                    "slope_below_kink_per_block",
+                )?,
+                slope_above_kink_per_block: parse_u128(
+                    &self.irm.slope_above_kink_per_block,
+                    "slope_above_kink_per_block",
+                )?,
+                kink_bps: Bps(self.irm.kink_bps),
+            },
+            Bps(self.liquidation_threshold_bps),
+            Bps(self.liquidation_bonus_bps),
+            Bps(self.reserve_factor_bps),
+            at_block,
+        );
+        m.total_supplied = parse_u128(&self.initial_total_supplied, "initial_total_supplied")?;
+        Ok(m)
+    }
+}
+
+/// Apply a genesis to a fresh bridge: register every market and replay
+/// every demo account's deposit + borrow. Equivalent to calling
+/// `seed_v0_lending_markets` + `seed_v0_demo_accounts` when the genesis
+/// is `devnet-genesis.json`; arbitrary configs work the same way.
+///
+/// Markets are built first (so u128-parse errors surface before any
+/// bridge mutation); only then are accounts replayed against the
+/// installed markets.
+///
+/// Caller must guarantee the bridge is on a fresh chain — replaying
+/// against a bridge that already has positions for the same accounts
+/// will fail at the second `lending_borrow`, exactly as the hardcoded
+/// seed path does.
+pub(crate) fn apply_to_bridge<P>(
+    genesis: &PrincepsGenesis,
+    bridge: &LiveRethEvmBridge<P>,
+) -> eyre::Result<()> {
+    let built_markets: Vec<Market> = genesis
+        .markets
+        .iter()
+        .map(|gm| gm.build(0))
+        .collect::<eyre::Result<_>>()?;
+
+    bridge.with_markets_mut(|m| {
+        for market in built_markets {
+            m.insert(market.id, market);
+        }
+    });
+
+    for da in &genesis.demo_accounts {
+        let acct = LendingAccountId(da.account_id);
+        let market_id = MarketId(da.market_id);
+        let parse_u128 = |s: &str, field: &str| -> eyre::Result<u128> {
+            s.parse()
+                .map_err(|e| eyre::eyre!("demo_account {} {field}: {e}", da.account_id))
+        };
+        let collateral = parse_u128(&da.collateral, "collateral")?;
+        let borrow = parse_u128(&da.borrow, "borrow")?;
+        let coll_price = parse_u128(&da.seed_price_collateral, "seed_price_collateral")?;
+        let und_price = parse_u128(&da.seed_price_underlying, "seed_price_underlying")?;
+
+        bridge
+            .lending_deposit_collateral(acct, market_id, collateral)
+            .map_err(|e| eyre::eyre!("demo_account {} deposit: {e:?}", da.account_id))?;
+        bridge
+            .lending_borrow(acct, market_id, borrow, coll_price, und_price)
+            .map_err(|e| eyre::eyre!("demo_account {} borrow: {e:?}", da.account_id))?;
+        bridge.with_accounts_mut(|map| {
+            map.insert(acct, Account::flat(acct));
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,13 +352,65 @@ mod tests {
     /// sample have drifted apart.
     #[test]
     fn committed_testnet_genesis_loads() {
-        // CARGO_MANIFEST_DIR is bin/princeps; the sample lives at the
-        // princeps/ root (TD-005 — top-level for operator visibility).
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../genesis/testnet-genesis.json");
-        let g = PrincepsGenesis::load(&path).expect("committed genesis must parse");
+        let g = PrincepsGenesis::load(&committed_genesis_path("testnet-genesis.json"))
+            .expect("testnet genesis must parse");
         assert!(g.chain_id > 0);
         assert!(!g.validators.is_empty(), "testnet needs ≥1 validator");
         assert!(!g.markets.is_empty(), "testnet needs ≥1 lending market");
+    }
+
+    /// Sibling check for `devnet-genesis.json` — same schema, populated
+    /// `demo_accounts`. If this fails the devnet boot path is broken
+    /// even though the testnet one still works.
+    #[test]
+    fn committed_devnet_genesis_loads() {
+        let g = PrincepsGenesis::load(&committed_genesis_path("devnet-genesis.json"))
+            .expect("devnet genesis must parse");
+        assert!(!g.markets.is_empty());
+        assert_eq!(g.demo_accounts.len(), 5, "devnet seeds 5 demo accounts");
+    }
+
+    /// The keystone determinism guarantee for T1c-a: building the
+    /// `princeps_lending::Market` from `devnet-genesis.json` produces
+    /// a struct byte-equal to what the hardcoded `seed_v0_lending_markets`
+    /// constructs. If anyone edits one path without updating the
+    /// other, this fires.
+    #[test]
+    fn devnet_genesis_market_matches_seed_v0() {
+        use princeps_lending::{AssetId, Bps, Index, IrmParams, Market, MarketId};
+        let g = PrincepsGenesis::load(&committed_genesis_path("devnet-genesis.json"))
+            .expect("load devnet genesis");
+        let built = g.markets[0].build(0).expect("build");
+
+        // Mirrors `seed_v0_lending_markets` exactly. If that function
+        // ever changes, this expected-value block must change with it.
+        let mut expected = Market::new(
+            MarketId(0),
+            AssetId(1),
+            AssetId(0),
+            IrmParams {
+                base_rate_per_block: 0,
+                slope_below_kink_per_block: Index::RAY / 10_000,
+                slope_above_kink_per_block: Index::RAY / 1_000,
+                kink_bps: Bps(8_000),
+            },
+            Bps(9_500),
+            Bps(500),
+            Bps(1_000),
+            0,
+        );
+        expected.total_supplied = 1_000_000;
+
+        assert_eq!(built, expected, "genesis-built market must equal seed_v0 market");
+    }
+
+    /// Helper — resolves a committed genesis filename to its absolute
+    /// path. CARGO_MANIFEST_DIR is `bin/princeps`; the genesis dir
+    /// lives at the princeps/ root (TD-005 — top-level for operator
+    /// visibility).
+    fn committed_genesis_path(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../genesis")
+            .join(name)
     }
 }
