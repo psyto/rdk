@@ -44,7 +44,7 @@ mod socialize;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_genesis::Genesis;
 use clap::{Parser, Subcommand};
@@ -1775,7 +1775,13 @@ async fn run_reth_devnet(
                     > = std::collections::BTreeMap::new();
                     lending_prices.insert(princeps_lending::MarketId(0), (1, 1));
                     let perp_im_bps = node.config().liquidation_params.initial_margin_bps;
+                    // T2b-d — wall-clock-bracket the unified scan so
+                    // p99 latency surfaces in Prometheus. Alert when
+                    // p99 approaches block-time; that's the leading
+                    // edge of the scan failing to keep up.
+                    let scan_started = Instant::now();
                     let unified = bridge_for_hook.scan_unified(mark, perp_im_bps, &lending_prices);
+                    princeps_evm::metrics::record_scan_duration(scan_started.elapsed());
                     for (account, free) in &unified.flagged {
                         let shortfall = bridge_for_hook
                             .absorb_account_bad_debt(*account, mark, &lending_prices);

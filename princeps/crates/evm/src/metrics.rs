@@ -45,6 +45,15 @@ pub const PRINCEPS_LENDING_POSITIONS: &str = "princeps_lending_positions";
 /// matches `seed_v0_demo_accounts`'s post-seed count.
 pub const PRINCEPS_ACCOUNTS: &str = "princeps_accounts";
 
+/// Histogram: wall-clock seconds spent inside
+/// `LiveRethEvmBridge::scan_unified` per per-block invocation.
+/// Sourced from `Instant::now()` brackets in the binary's per-block
+/// hook. p99 of this histogram is the leading indicator for the
+/// scan keeping up with block time — if p99 approaches block time
+/// the bridge is one fault away from missing a block. Alert at
+/// p99 > 250ms on a 1s-block testnet.
+pub const PRINCEPS_SCAN_DURATION_SECONDS: &str = "princeps_scan_duration_seconds";
+
 /// One-shot metadata registration. Called from
 /// `bin/princeps::observability::init_observability` alongside
 /// [`princeps_node::metrics::describe_metrics`] at boot.
@@ -60,6 +69,11 @@ pub fn describe_metrics() {
     metrics::describe_gauge!(
         PRINCEPS_ACCOUNTS,
         "Number of perp accounts on the bridge"
+    );
+    metrics::describe_histogram!(
+        PRINCEPS_SCAN_DURATION_SECONDS,
+        metrics::Unit::Seconds,
+        "Wall-clock duration of LiveRethEvmBridge::scan_unified per per-block invocation"
     );
 }
 
@@ -85,6 +99,15 @@ pub(crate) fn record_bridge_counts(markets: usize, positions: usize, accounts: u
     metrics::gauge!(PRINCEPS_LENDING_MARKETS).set(markets as f64);
     metrics::gauge!(PRINCEPS_LENDING_POSITIONS).set(positions as f64);
     metrics::gauge!(PRINCEPS_ACCOUNTS).set(accounts as f64);
+}
+
+/// Record one observation of `LiveRethEvmBridge::scan_unified`
+/// wall-clock duration. Called from the binary's per-block hook
+/// with `Instant::now()` brackets around the scan call.
+///
+/// Best-effort: no-op if no recorder is installed.
+pub fn record_scan_duration(elapsed: std::time::Duration) {
+    metrics::histogram!(PRINCEPS_SCAN_DURATION_SECONDS).record(elapsed.as_secs_f64());
 }
 
 #[cfg(test)]
@@ -159,5 +182,45 @@ mod tests {
         let _g = ::metrics::set_default_local_recorder(&recorder);
         describe_metrics();
         describe_metrics();
+    }
+
+    /// T2b-d: each call to `record_scan_duration` appends one
+    /// observation to the histogram in seconds (Duration → f64
+    /// via `as_secs_f64`). The keystone property: two successive
+    /// calls must show up as TWO observations, not get aggregated
+    /// or last-wins-overwritten. Catches any future regression
+    /// where `record_scan_duration` accidentally uses `gauge!` or
+    /// `counter!` instead of `histogram!`.
+    #[test]
+    fn record_scan_duration_appends_observations() {
+        use std::time::Duration;
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _g = ::metrics::set_default_local_recorder(&recorder);
+
+        record_scan_duration(Duration::from_millis(5));
+        record_scan_duration(Duration::from_millis(12));
+
+        let map = snapshot_map(&snapshotter);
+        match map.get(PRINCEPS_SCAN_DURATION_SECONDS) {
+            Some(DebugValue::Histogram(values)) => {
+                let secs: Vec<f64> = values.iter().map(|v| v.0).collect();
+                assert_eq!(secs.len(), 2, "expected two observations, got {secs:?}");
+                // Order may be implementation-defined; sort before comparing.
+                let mut sorted = secs.clone();
+                sorted.sort_by(f64::total_cmp);
+                assert!(
+                    (sorted[0] - 0.005).abs() < 1e-9,
+                    "first observation should be 5ms, got {sorted:?}"
+                );
+                assert!(
+                    (sorted[1] - 0.012).abs() < 1e-9,
+                    "second observation should be 12ms, got {sorted:?}"
+                );
+            }
+            other => panic!(
+                "{PRINCEPS_SCAN_DURATION_SECONDS} should be a Histogram, got {other:?}"
+            ),
+        }
     }
 }
