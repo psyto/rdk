@@ -47,6 +47,9 @@ sha2               = "0.10"
 hex                = "0.4"
 tempfile           = "3"
 k256               = { version = "0.13", default-features = false, features = ["ecdsa", "std", "precomputed-tables"] }
+aes-gcm            = "0.10"
+scrypt             = { version = "0.11", default-features = false, features = ["std", "simple"] }
+rpassword          = "7"
 metrics                     = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 

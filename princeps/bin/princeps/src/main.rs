@@ -38,6 +38,7 @@
 //! lands in Stage 13f.
 
 mod genesis;
+mod keystore;
 mod observability;
 mod socialize;
 mod validator_keygen;
@@ -426,8 +427,10 @@ enum LendingCommand {
 }
 
 /// Stage T3a-1 — validator-host key management subcommands.
-/// At T3a-1 only `gen-keys` exists; T3a-2 adds passphrase-encrypted
-/// keystore export (`export-keystore`) and import.
+/// T3a-1 introduced `gen-keys` (plaintext, devnet-friendly).
+/// T3a-2 adds `gen-keystore` — production-grade scrypt + AES-256-GCM
+/// encrypted keystore output. Loading encrypted keystores from
+/// `reth-devnet` boot is T3a-3.
 #[derive(Debug, Subcommand)]
 enum ValidatorCommand {
     /// Generate a fresh Ed25519 validator key and persist it to
@@ -462,6 +465,48 @@ enum ValidatorCommand {
         /// signatures until they update.
         #[arg(long, default_value_t = false)]
         force: bool,
+    },
+
+    /// Generate a fresh Ed25519 validator key, encrypt it under a
+    /// passphrase using scrypt + AES-256-GCM, and write the
+    /// keystore JSON to disk. Intended for production hosts where
+    /// the at-rest key file must survive a snapshot or filesystem
+    /// disclosure without leaking the private key.
+    ///
+    /// The passphrase is read from the TTY by default (asked
+    /// twice with a match check, never echoed). Use
+    /// `--passphrase-stdin` to read it from stdin instead — handy
+    /// for one-shot provisioning scripts, but the operator is
+    /// responsible for not leaving the passphrase in shell
+    /// history.
+    ///
+    /// Refuses to overwrite an existing file unless `--force`.
+    GenKeystore {
+        /// Explicit output path for the keystore JSON. When
+        /// supplied, takes precedence over `--data-dir`. The
+        /// `validator-pubkey.hex` sidecar lands in the parent
+        /// directory of this path so an operator can identify
+        /// which keystore is which without unlocking it.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Data directory to write into when `--out` is not given.
+        /// Defaults to `$HOME/.princeps/data`. The keystore lands
+        /// at `<data-dir>/validator-keystore.json` and the sidecar
+        /// at `<data-dir>/validator-pubkey.hex`.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Overwrite an existing keystore file. Default false.
+        /// Rotation semantics — same as `gen-keys --force`.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Read the passphrase from stdin (single line, trailing
+        /// newline stripped) instead of prompting on the TTY.
+        /// Suitable for scripted provisioning.
+        #[arg(long, default_value_t = false)]
+        passphrase_stdin: bool,
     },
 }
 
@@ -1059,15 +1104,21 @@ fn resolve_data_dir(user_supplied: Option<&PathBuf>) -> eyre::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".princeps").join("data"))
 }
 
-/// Stage T3a-1 — `princeps validator <action>` dispatch. Currently
-/// only `gen-keys`. Air-gapped path; does NOT boot Reth or
-/// Malachite, so a freshly provisioned host can mint keys without
-/// dragging in the consensus stack.
+/// Stage T3a-1+T3a-2 — `princeps validator <action>` dispatch.
+/// Air-gapped path; does NOT boot Reth or Malachite, so a freshly
+/// provisioned host can mint keys without dragging in the
+/// consensus stack.
 fn run_validator_subcommand(cmd: ValidatorCommand) -> eyre::Result<()> {
     match cmd {
         ValidatorCommand::GenKeys { out, data_dir, force } => {
             run_validator_gen_keys(out, data_dir, force)
         }
+        ValidatorCommand::GenKeystore {
+            out,
+            data_dir,
+            force,
+            passphrase_stdin,
+        } => run_validator_gen_keystore(out, data_dir, force, passphrase_stdin),
     }
 }
 
@@ -1100,6 +1151,87 @@ fn run_validator_gen_keys(
     println!("  pubkey   : {}", hex::encode(public.as_bytes()));
     println!("  sidecar  : {}", sidecar.display());
     Ok(())
+}
+
+/// Stage T3a-2: scrypt+AES-256-GCM-encrypted keystore output.
+/// Production-grade counterpart to `gen-keys`.
+fn run_validator_gen_keystore(
+    out: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    force: bool,
+    passphrase_stdin: bool,
+) -> eyre::Result<()> {
+    let keystore_path = if let Some(p) = out {
+        p
+    } else {
+        let dir = resolve_data_dir(data_dir.as_ref())?;
+        dir.join(keystore::VALIDATOR_KEYSTORE_FILENAME)
+    };
+    let parent_dir = keystore_path
+        .parent()
+        .ok_or_else(|| eyre::eyre!("--out path has no parent: {}", keystore_path.display()))?
+        .to_path_buf();
+
+    // Pre-flight the path check so the operator doesn't type a
+    // long passphrase and then learn the file already exists.
+    if keystore_path.exists() && !force {
+        eyre::bail!(
+            "keystore already exists at {} (pass --force to overwrite)",
+            keystore_path.display()
+        );
+    }
+
+    let passphrase = read_passphrase(passphrase_stdin)?;
+    if passphrase.is_empty() {
+        eyre::bail!("passphrase must not be empty");
+    }
+
+    let private =
+        informalsystems_malachitebft_signing_ed25519::PrivateKey::generate(rand::rngs::OsRng);
+    let public = private.public_key();
+    let keystore_doc = keystore::encrypt(
+        &private,
+        passphrase.as_bytes(),
+        keystore::ScryptParams::production(),
+    )?;
+    keystore::write_to_path(&keystore_doc, &keystore_path, force)?;
+    let sidecar = validator_keygen::write_pubkey_sidecar(&parent_dir, &public)?;
+
+    println!("validator keystore generated");
+    println!("  keystore : {}", keystore_path.display());
+    println!("  pubkey   : {}", hex::encode(public.as_bytes()));
+    println!("  sidecar  : {}", sidecar.display());
+    println!("  kdf      : scrypt (n={}, r={}, p={})",
+        keystore_doc.kdf.n, keystore_doc.kdf.r, keystore_doc.kdf.p);
+    println!("  cipher   : aes-256-gcm");
+    Ok(())
+}
+
+/// Source a validator-keystore passphrase from either stdin (one
+/// line, newline-stripped) or the TTY (asked twice, never echoed,
+/// rejected if the two attempts don't match). The empty-string
+/// check is done by the caller because the source-specific paths
+/// have slightly different "where did this empty come from"
+/// diagnostics.
+fn read_passphrase(from_stdin: bool) -> eyre::Result<String> {
+    if from_stdin {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_line(&mut buf)
+            .map_err(|e| eyre::eyre!("read passphrase from stdin: {e}"))?;
+        // strip a single trailing newline (\n or \r\n)
+        let trimmed = buf.trim_end_matches(['\n', '\r']).to_string();
+        Ok(trimmed)
+    } else {
+        let first = rpassword::prompt_password("passphrase: ")
+            .map_err(|e| eyre::eyre!("read passphrase from tty: {e}"))?;
+        let second = rpassword::prompt_password("passphrase (confirm): ")
+            .map_err(|e| eyre::eyre!("read passphrase from tty: {e}"))?;
+        if first != second {
+            eyre::bail!("passphrases do not match");
+        }
+        Ok(first)
+    }
 }
 
 fn print_info() {
