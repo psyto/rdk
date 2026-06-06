@@ -1,0 +1,399 @@
+{
+  "title": "Princeps Overview",
+  "description": "T2c of docs/plans/v0-testnet-deploy.md. Operator-grade view of every metric princeps-node and princeps-evm emit as of T2b-d. Four rows: chain health, risk & safety, scan performance, state counts. Import requires selecting a Prometheus datasource that scrapes the validator's --reth-metrics-bind endpoint.",
+  "tags": ["princeps", "testnet", "v0"],
+  "schemaVersion": 38,
+  "version": 1,
+  "uid": "princeps-overview",
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(princeps_block_height, instance)",
+        "includeAll": true,
+        "multi": false,
+        "refresh": 2,
+        "current": { "value": "$__all", "text": "All" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Chain health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Block height",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "max(princeps_block_height{instance=~\"$instance\"})",
+          "legendFormat": "height",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Block timestamp",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "targets": [
+        {
+          "expr": "max(princeps_block_time{instance=~\"$instance\"})",
+          "legendFormat": "block_time",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Tick rate (1m avg)",
+      "description": "Per-second tick rate over the last minute. Should track ~1 Hz on a 1s-block testnet.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(rate(princeps_ticks_total{instance=~\"$instance\"}[1m]))",
+          "legendFormat": "ticks/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "hertz",
+          "decimals": 2,
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 0.5 },
+            { "color": "green", "value": 0.9 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Last block age",
+      "description": "Time since princeps_block_time. Liveness proxy — should stay near zero. Watch for sustained increase.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        {
+          "expr": "time() - max(princeps_block_time{instance=~\"$instance\"})",
+          "legendFormat": "age",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 5 },
+            { "color": "red", "value": 30 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Risk & safety",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Lending halt",
+      "description": "0 = clear. >0 = halted until that block height (ADR-010 Layer 1). Should rarely be non-zero outside chaos drills.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "max(princeps_lending_halt_armed_until{instance=~\"$instance\"})",
+          "legendFormat": "armed_until",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ] },
+          "mappings": [{ "type": "value", "options": { "0": { "text": "CLEAR", "color": "green" } } }]
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Insurance fund balance",
+      "description": "Signed. Negative = absorbed bad debt exceeded prior reserves; this is the leading edge of an ADR-010 halt.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 6 },
+      "targets": [
+        {
+          "expr": "max(princeps_insurance_fund_balance{instance=~\"$instance\"})",
+          "legendFormat": "balance",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "green", "value": 1000 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Unfilled liquidation deficit",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "max(princeps_liquidation_unfilled_deficit{instance=~\"$instance\"})",
+          "legendFormat": "deficit",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "red", "value": 1000 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Halt & circuit-breaker trip rate",
+      "description": "Rate of new halt-armed / extend events and oracle-circuit-breaker trips per minute. Should be near zero in steady state.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(princeps_lending_halt_trips_total{instance=~\"$instance\"}[5m])) * 60",
+          "legendFormat": "lending halt /min",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(princeps_oracle_circuit_breaker_trips_total{instance=~\"$instance\"}[5m])) * 60",
+          "legendFormat": "oracle CB /min",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(princeps_funding_settlements_total{instance=~\"$instance\"}[5m])) * 60",
+          "legendFormat": "funding /min",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 1, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Scan performance",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Scan duration percentiles",
+      "description": "histogram_quantile over princeps_scan_duration_seconds. p99 approaching block time is the leading indicator for scan failing to keep up. Constant doc references alert at p99 > 250ms on a 1s-block testnet.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 9, "w": 18, "x": 0, "y": 11 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(princeps_scan_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(princeps_scan_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(princeps_scan_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2, "fillOpacity": 5, "drawStyle": "line" },
+          "color": { "mode": "palette-classic" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.1 },
+            { "color": "red", "value": 0.25 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Scan p99 (5m)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 11 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(princeps_scan_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p99",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.1 },
+            { "color": "red", "value": 0.25 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "State counts",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "collapsed": false
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Bridge state",
+      "description": "Markets / lending positions / perp accounts on the bridge. Markets should stay constant for the v0 single-pair deployment; positions and accounts grow as users transact.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "expr": "max(princeps_lending_markets{instance=~\"$instance\"})",
+          "legendFormat": "markets",
+          "refId": "A"
+        },
+        {
+          "expr": "max(princeps_lending_positions{instance=~\"$instance\"})",
+          "legendFormat": "lending positions",
+          "refId": "B"
+        },
+        {
+          "expr": "max(princeps_accounts{instance=~\"$instance\"})",
+          "legendFormat": "perp accounts",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 1, "fillOpacity": 5, "drawStyle": "line" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Chain-history blocks",
+      "description": "Distinct heights with at least one ADR-010 Layer 3 event. Append-only; gradient should be flat in steady state and step up only on socialization declarations.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        {
+          "expr": "max(princeps_chain_history_blocks{instance=~\"$instance\"})",
+          "legendFormat": "chain-history blocks",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "drawStyle": "line" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    }
+  ]
+}
