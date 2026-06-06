@@ -413,4 +413,65 @@ mod tests {
             .join("../../genesis")
             .join(name)
     }
+
+    /// T1d — the genesis-hash determinism guarantee. Two independent
+    /// loads of the same genesis file, applied to two independent
+    /// fresh bridges, must produce byte-identical (markets, positions,
+    /// accounts) state. This is the single-process surrogate for the
+    /// cross-validator convergence property a real multi-validator
+    /// network needs at genesis: if either side of the load → apply
+    /// pipeline becomes non-deterministic (HashMap iteration leaking
+    /// into a Vec field, system time creeping into a struct,
+    /// `Position::empty` picking up randomness, etc.), two validators
+    /// running the same binary against the same genesis file would
+    /// diverge at block 0. This test refuses that.
+    #[test]
+    fn genesis_apply_is_deterministic_across_loads() {
+        let path = committed_genesis_path("devnet-genesis.json");
+
+        let g1 = PrincepsGenesis::load(&path).expect("load 1");
+        let bridge1 = LiveRethEvmBridge::new((), crate::dev_chain_spec());
+        apply_to_bridge(&g1, &bridge1).expect("apply 1");
+
+        let g2 = PrincepsGenesis::load(&path).expect("load 2");
+        let bridge2 = LiveRethEvmBridge::new((), crate::dev_chain_spec());
+        apply_to_bridge(&g2, &bridge2).expect("apply 2");
+
+        // Structural equality on each sub-state — sharper error
+        // messages when one of the three diverges.
+        assert_eq!(
+            bridge1.markets_snapshot(),
+            bridge2.markets_snapshot(),
+            "markets diverged across independent loads"
+        );
+        assert_eq!(
+            bridge1.positions_snapshot(),
+            bridge2.positions_snapshot(),
+            "positions diverged across independent loads"
+        );
+        assert_eq!(
+            bridge1.snapshot().accounts,
+            bridge2.snapshot().accounts,
+            "accounts diverged across independent loads"
+        );
+
+        // Belt-and-suspenders: serialize the combined state and
+        // compare raw bytes. Catches any divergence that the
+        // structural assertions above might miss (e.g., a future
+        // field added to Market/Position/Account that derives
+        // PartialEq trivially but serializes non-deterministically).
+        let combined1 = serde_json::to_vec(&(
+            bridge1.markets_snapshot(),
+            bridge1.positions_snapshot(),
+            bridge1.snapshot().accounts,
+        ))
+        .expect("ser 1");
+        let combined2 = serde_json::to_vec(&(
+            bridge2.markets_snapshot(),
+            bridge2.positions_snapshot(),
+            bridge2.snapshot().accounts,
+        ))
+        .expect("ser 2");
+        assert_eq!(combined1, combined2, "combined serialized state diverged");
+    }
 }
