@@ -38,6 +38,7 @@
 //! lands in Stage 13f.
 
 mod genesis;
+mod observability;
 mod socialize;
 
 use std::net::IpAddr;
@@ -312,6 +313,20 @@ enum Command {
         /// snapshot exactly like the hardcoded path).
         #[arg(long)]
         reth_genesis_file: Option<PathBuf>,
+
+        /// Stage T2b — Prometheus scrape endpoint bind address. When
+        /// supplied, the node installs a `metrics-exporter-prometheus`
+        /// recorder and spawns an HTTP listener on this address; all
+        /// per-tick metrics from [`princeps_node::metrics`] (and
+        /// future bridge-side metrics in T2b-b/c/d) become scrape-
+        /// able. When omitted, no recorder is installed and every
+        /// `metrics::gauge!` / `metrics::counter!` becomes a no-op.
+        /// Address must be different from the p2p `--listen-addr`
+        /// and JSON-RPC `--rpc-bind` (TD-004 — public scrape traffic
+        /// never touches the validator's consensus surface).
+        /// Example: `--reth-metrics-bind=127.0.0.1:9100`.
+        #[arg(long)]
+        reth_metrics_bind: Option<std::net::SocketAddr>,
     },
 }
 
@@ -473,6 +488,7 @@ fn main() -> eyre::Result<()> {
             reth_operator_signing_key_seed,
             reth_chain_history_file,
             reth_genesis_file,
+            reth_metrics_bind,
         } => tokio_rt()?.block_on(run_reth_devnet(
             rounds,
             moniker,
@@ -485,6 +501,7 @@ fn main() -> eyre::Result<()> {
             reth_operator_signing_key_seed,
             reth_chain_history_file,
             reth_genesis_file,
+            reth_metrics_bind,
         )),
     }
 }
@@ -1118,7 +1135,16 @@ async fn run_reth_devnet(
     operator_signing_key_seed: u8,
     chain_history_file: Option<PathBuf>,
     genesis_file: Option<PathBuf>,
+    metrics_bind: Option<std::net::SocketAddr>,
 ) -> eyre::Result<()> {
+    // T2b — bring up the Prometheus scrape endpoint BEFORE the first
+    // tick fires. Skipped (silently) when the flag is unset; emissions
+    // become no-ops in that case.
+    if let Some(addr) = metrics_bind {
+        observability::init_observability(addr)?;
+        println!("      metrics endpoint = http://{addr}/metrics");
+    }
+
     println!(
         "princeps v{} — driving {} reth-backed decision{}",
         env!("CARGO_PKG_VERSION"),
