@@ -40,6 +40,7 @@
 mod genesis;
 mod observability;
 mod socialize;
+mod validator_keygen;
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -50,10 +51,8 @@ use alloy_genesis::Genesis;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use informalsystems_malachitebft_app::node::{Node, NodeHandle};
-use informalsystems_malachitebft_signing_ed25519::PrivateKey;
 use princeps_consensus::run_engine_app;
 use princeps_consensus::run_single_validator;
-use princeps_consensus::PrincepsPrivateKeyFile;
 use rdk_clob::{AccountId as ClobAccountId, Order, OrderId, OrderType, Price, Qty, Side};
 use princeps_evm::{BridgeSnapshot, InMemoryEvmBridge, LiveRethEvmBridge, PrincepsExecutorBuilder};
 use k256::ecdsa::{signature::Signer, SigningKey};
@@ -62,7 +61,6 @@ use rdk_liquidation::{AccountSnapshot, CloseOutcomeKind};
 use princeps_node::{CoordinatorSnapshot, PrincepsNode, PrincepsNodeConfig, TickInput, TickReport};
 use rdk_oracle::{FeedId, PriceObservation, PublisherKey, Signature as OracleSignature};
 use rdk_types::BlockHash;
-use rand::rngs::OsRng;
 use reth_chainspec::ChainSpec;
 use reth_db::{init_db, mdbx::DatabaseArguments};
 use reth_node_builder::{NodeBuilder, NodeHandle as RethNodeHandle};
@@ -190,6 +188,19 @@ enum Command {
         /// appended-to if present.
         #[arg(long)]
         chain_history_file: Option<PathBuf>,
+    },
+
+    /// Validator-host key management. Currently exposes
+    /// `gen-keys` for offline (air-gapped) generation of a fresh
+    /// validator key — Stage T3a-1 of the v0 testnet deploy plan.
+    ///
+    /// Example:
+    ///   princeps validator gen-keys                  # writes to default data dir
+    ///   princeps validator gen-keys --out /mnt/usb/validator-key.json
+    ///   princeps validator gen-keys --force          # rotate the default key
+    Validator {
+        #[command(subcommand)]
+        action: ValidatorCommand,
     },
 
     /// Drive consensus decisions through Reth-backed `LiveRethEvmBridge` +
@@ -414,6 +425,46 @@ enum LendingCommand {
     },
 }
 
+/// Stage T3a-1 — validator-host key management subcommands.
+/// At T3a-1 only `gen-keys` exists; T3a-2 adds passphrase-encrypted
+/// keystore export (`export-keystore`) and import.
+#[derive(Debug, Subcommand)]
+enum ValidatorCommand {
+    /// Generate a fresh Ed25519 validator key and persist it to
+    /// disk. Intended for air-gapped key generation — does NOT
+    /// boot Reth or Malachite. The on-disk format matches what
+    /// `reth-devnet` generates on first boot, so a key minted
+    /// here can be picked up by a subsequent `reth-devnet` run
+    /// against the same `--data-dir`.
+    ///
+    /// Refuses to overwrite an existing key file unless `--force`
+    /// is set — guards against a single mistyped command nuking
+    /// an established validator identity.
+    GenKeys {
+        /// Explicit output path for the validator key JSON. When
+        /// supplied, takes precedence over `--data-dir`. The
+        /// `validator-pubkey.hex` sidecar lands in the parent
+        /// directory of this path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Data directory to write into when `--out` is not given.
+        /// Defaults to `$HOME/.princeps/data` (same default as
+        /// `reth-devnet --data-dir`). The key lands at
+        /// `<data-dir>/validator-key.json` and the sidecar at
+        /// `<data-dir>/validator-pubkey.hex`.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Overwrite an existing key file. Default false. Treat
+        /// this as a rotation operation — any peers configured
+        /// with the old pubkey will reject this validator's
+        /// signatures until they update.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+}
+
 /// On-disk shape of `--validators <path>`. Stage 13j.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ValidatorSetFile {
@@ -457,6 +508,7 @@ fn main() -> eyre::Result<()> {
         Command::Devnet { rounds } => tokio_rt()?.block_on(run_devnet(rounds)),
         Command::LendingDemo { eth_crash_price } => run_lending_demo(eth_crash_price),
         Command::Lending { action } => run_lending_subcommand(action),
+        Command::Validator { action } => run_validator_subcommand(action),
         Command::Socialize {
             operator,
             market,
@@ -1007,6 +1059,49 @@ fn resolve_data_dir(user_supplied: Option<&PathBuf>) -> eyre::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".princeps").join("data"))
 }
 
+/// Stage T3a-1 — `princeps validator <action>` dispatch. Currently
+/// only `gen-keys`. Air-gapped path; does NOT boot Reth or
+/// Malachite, so a freshly provisioned host can mint keys without
+/// dragging in the consensus stack.
+fn run_validator_subcommand(cmd: ValidatorCommand) -> eyre::Result<()> {
+    match cmd {
+        ValidatorCommand::GenKeys { out, data_dir, force } => {
+            run_validator_gen_keys(out, data_dir, force)
+        }
+    }
+}
+
+fn run_validator_gen_keys(
+    out: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    force: bool,
+) -> eyre::Result<()> {
+    // `--out` wins when supplied; otherwise compose
+    // `<data-dir>/validator-key.json` against the same default
+    // `reth-devnet` uses. Sidecar always lands in the parent of the
+    // resolved key path so a `gen-keys --out /mnt/usb/...` puts the
+    // pubkey alongside the key for the operator to scp back.
+    let key_path = if let Some(p) = out {
+        p
+    } else {
+        let dir = resolve_data_dir(data_dir.as_ref())?;
+        dir.join(validator_keygen::VALIDATOR_KEY_FILENAME)
+    };
+    let parent_dir = key_path
+        .parent()
+        .ok_or_else(|| eyre::eyre!("--out path has no parent: {}", key_path.display()))?
+        .to_path_buf();
+
+    let (_private, public) = validator_keygen::generate_fresh(&key_path, force)?;
+    let sidecar = validator_keygen::write_pubkey_sidecar(&parent_dir, &public)?;
+
+    println!("validator key generated");
+    println!("  key file : {}", key_path.display());
+    println!("  pubkey   : {}", hex::encode(public.as_bytes()));
+    println!("  sidecar  : {}", sidecar.display());
+    Ok(())
+}
+
 fn print_info() {
     let config = PrincepsNodeConfig::hyperliquid_default();
     let node = PrincepsNode::new(config);
@@ -1354,42 +1449,24 @@ async fn run_reth_devnet(
 
     // 3. Consensus node with single-validator set.
     //    Stage 13h: load the validator key from disk if present,
-    //    otherwise generate fresh and write it. With this in place
-    //    consecutive runs use the same validator identity, which is
-    //    a prerequisite for Malachite WAL reuse (Stage 13h+).
-    let key_path = data_dir_path.join("validator-key.json");
-    let (private, key_status) = if key_path.exists() {
-        let bytes = std::fs::read(&key_path)?;
-        let file: PrincepsPrivateKeyFile = serde_json::from_slice(&bytes)
-            .map_err(|e| eyre::eyre!("malformed validator key at {key_path:?}: {e}"))?;
-        (file.into_private_key(), "loaded")
-    } else {
-        let fresh = PrivateKey::generate(OsRng);
-        let file = PrincepsPrivateKeyFile::from_private_key(&fresh);
-        if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&key_path, serde_json::to_vec_pretty(&file)?)?;
-        // Make the key file owner-readable only — minor hardening so a
-        // shared-filesystem mishap doesn't surface the validator's
-        // secret to other users on the host.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        (fresh, "generated")
-    };
+    //    otherwise generate fresh and write it — same identity
+    //    across consecutive runs is a prerequisite for Malachite WAL
+    //    reuse. Stage T3a-1 lifted the inline logic into
+    //    `validator_keygen` so the same code path is shared with
+    //    the air-gapped `princeps validator gen-keys` subcommand.
+    let key_path = data_dir_path.join(validator_keygen::VALIDATOR_KEY_FILENAME);
+    let (private, key_status) = validator_keygen::gen_or_load(&key_path)?;
     let public = private.public_key();
     println!("[3/6] {key_status} validator key from {}", key_path.display());
 
-    // Write a `validator-pubkey.hex` sidecar so scripts / operators can
-    // read the pubkey without parsing logs or reimplementing Ed25519
-    // scalar multiplication. Idempotent — overwrites every boot so a
-    // stale sidecar from a different key file can't drift.
-    let pubkey_path = data_dir_path.join("validator-pubkey.hex");
-    let pubkey_hex = hex::encode(public.as_bytes());
-    std::fs::write(&pubkey_path, format!("{pubkey_hex}\n"))?;
+    // Sidecar with the pubkey hex so scripts / operators can read
+    // the pubkey without parsing logs or reimplementing Ed25519
+    // scalar multiplication. Idempotent — overwrites every boot so
+    // a stale sidecar from a different key file can't drift. We
+    // discard the returned sidecar path — the reth-devnet boot
+    // log already names `--data-dir`, and the sidecar always lives
+    // at the conventional filename inside it.
+    let _sidecar_path = validator_keygen::write_pubkey_sidecar(&data_dir_path, &public)?;
 
     // Stage 13j: validator set — load from file if given, else
     // construct single-validator set from the loaded key (preserves
