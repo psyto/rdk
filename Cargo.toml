@@ -113,6 +113,8 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proptest           = "1"
 criterion          = "0.5"
+metrics            = "0.24"
+metrics-util       = "0.20"
 
 [workspace.lints.rust]
 unsafe_code                   = "forbid"

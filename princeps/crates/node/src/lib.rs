@@ -62,6 +62,7 @@
 //! will own wiring of these two layers together.
 
 pub mod chain_history;
+pub mod metrics;
 pub mod operator;
 
 use std::collections::VecDeque;
@@ -662,7 +663,7 @@ impl PrincepsNode {
                 .tick(input.block_time, input.mark, index, &positions)
         });
 
-        TickReport {
+        let report = TickReport {
             block_height: input.block_height,
             block_time: input.block_time,
             oracle: oracle_result,
@@ -678,7 +679,10 @@ impl PrincepsNode {
                 None
             },
             lending_halt_tripped_until,
-        }
+        };
+        // T2a — emit per-tick metrics. No-op if no recorder is installed.
+        crate::metrics::record_tick(&report);
+        report
     }
 
     /// Returns `true` if the oracle circuit breaker is currently armed
