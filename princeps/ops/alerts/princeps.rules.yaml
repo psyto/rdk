@@ -1,0 +1,228 @@
+# Princeps v0 testnet — Prometheus alerting rules.
+#
+# Stage T2d of docs/plans/v0-testnet-deploy.md. Companion to the
+# Grafana dashboard at princeps/ops/grafana/princeps-overview.json
+# (T2c). Targets Prometheus 2.x rule-file format; consumed by
+# Alertmanager via the standard `rule_files:` block in prometheus.yml.
+#
+# Severity convention (matches the v0-testnet-deploy.md TD-006 split):
+#   severity: page    — wakes a human (validator-liveness loss, oracle
+#                       staleness, clock skew, scan falling behind block
+#                       time, scrape down)
+#   severity: warning — ticket-grade, precursor signals (insurance fund
+#                       negative, unfilled liquidation deficit, scan
+#                       degrading)
+#   severity: info    — sustained-state notifications (lending halt
+#                       armed) — explicitly classified as "info, not
+#                       page" by TD-006
+#
+# Metric names are sourced from the &'static str constants in
+#   princeps/crates/node/src/metrics.rs
+#   princeps/crates/evm/src/metrics.rs
+# Any rename there must be reflected here in the same change.
+#
+# What's NOT alerted on yet:
+#   - Per-publisher oracle observation age. TD-006 calls for "oracle
+#     observation age per publisher" but the corresponding gauge has
+#     not been wired (see the deferred-list in
+#     princeps_node::metrics:22). Until then, oracle-staleness paging
+#     piggybacks on the circuit-breaker counter — a CB trip is the
+#     downstream consequence of sustained staleness (threat-model O-3).
+#     Replace `PrincepsOracleCircuitBreakerTripped` with a per-publisher
+#     age-based rule once that gauge lands.
+#   - Per-validator liveness gauge. Block-height progress is the
+#     proxy today (same deferred-list comment).
+#   - Coordinator-snapshot divergence between peers. Will need a
+#     gauge fed from the consensus layer; not in T2 scope.
+
+groups:
+  - name: princeps_critical
+    interval: 30s
+    rules:
+      - alert: PrincepsScrapeDown
+        expr: up{job=~"princeps.*"} == 0
+        for: 2m
+        labels:
+          severity: page
+          area: chain
+        annotations:
+          summary: "Prometheus cannot scrape princeps validator {{ $labels.instance }}"
+          description: |
+            The /metrics endpoint on {{ $labels.instance }} has been
+            unreachable for 2 minutes. Either the validator process
+            is down, the metrics-bind address has changed, or the
+            network path between Prometheus and the validator is
+            broken. Either way the operator has no liveness signal
+            on this validator until scrape returns.
+
+      - alert: PrincepsBlockProductionStalled
+        # Testnet target block time is ~1s. No block-height advance
+        # over a full 60-second window means consensus has stalled
+        # or the validator has fallen out of the active set.
+        # `min_over_time` on the delta catches the case where the
+        # gauge resets cleanly back to a constant value without
+        # actually advancing.
+        expr: |
+          (max by (instance) (princeps_block_height)
+           - min_over_time(max by (instance) (princeps_block_height)[1m:5s])) == 0
+        for: 1m
+        labels:
+          severity: page
+          area: chain
+        annotations:
+          summary: "Princeps block height stalled on {{ $labels.instance }}"
+          description: |
+            princeps_block_height has not advanced on {{ $labels.instance }}
+            for at least 1 minute. With a ~1s target block time this
+            is a clear liveness fault — either consensus is halted,
+            this validator has fallen out of the active set, or the
+            per-block hook itself is wedged.
+
+      - alert: PrincepsOracleCircuitBreakerTripped
+        # See header note: this is the staleness-paging proxy until
+        # per-publisher age is exposed. CB tripping is the downstream
+        # consequence of sustained staleness (threat-model O-3); the
+        # 5m `increase` window keeps a single transient trip from
+        # paging if it recovers within one eval interval.
+        expr: increase(princeps_oracle_circuit_breaker_trips_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: page
+          area: oracle
+        annotations:
+          summary: "Oracle circuit breaker tripped on {{ $labels.instance }}"
+          description: |
+            princeps_oracle_circuit_breaker_trips_total has increased
+            in the last 5 minutes on {{ $labels.instance }}. The CB
+            trips when oracle freshness fails the threat-model O-3
+            check. The chain has entered safety-trip; trading is
+            suspended until oracle health recovers and the breaker
+            clears.
+
+      - alert: PrincepsScanApproachingBlockTime
+        # Histogram-quantile threshold matches the leading-indicator
+        # discussion in princeps_evm::metrics::PRINCEPS_SCAN_DURATION_SECONDS
+        # — 50% of a 1s block budget is the point at which a single
+        # bad scan tips into a missed block.
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, instance) (rate(princeps_scan_duration_seconds_bucket[5m]))
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: page
+          area: performance
+        annotations:
+          summary: "Scan p99 > 500ms on {{ $labels.instance }}"
+          description: |
+            scan_unified p99 has exceeded 500ms for 5 minutes on
+            {{ $labels.instance }}. With a 1s target block time the
+            bridge is one bad scan from missing a block. Investigate
+            scan-loop hot paths and consider rate-limiting the
+            external load source if this correlates with RPC traffic.
+
+      - alert: PrincepsClockSkewExcessive
+        # Open question #7 of v0-testnet-deploy.md: Malachite
+        # consensus is timestamp-sensitive; clock skew > 1s should
+        # page. Requires node_exporter on the validator host (the
+        # princeps binary does not expose its own clock metric).
+        # node_timex_offset_seconds is the standard NTP-reported
+        # offset; the absolute-value compare catches drift in either
+        # direction.
+        expr: abs(node_timex_offset_seconds) > 1
+        for: 2m
+        labels:
+          severity: page
+          area: host
+        annotations:
+          summary: "Clock skew > 1s on {{ $labels.instance }}"
+          description: |
+            node_timex_offset_seconds on {{ $labels.instance }} has
+            exceeded 1 second for 2 minutes. Malachite consensus is
+            timestamp-sensitive and skew at this magnitude risks
+            block-time disagreements with peers. Check chronyd /
+            ntpd status on the host immediately.
+
+  - name: princeps_warning
+    interval: 30s
+    rules:
+      - alert: PrincepsLendingHaltArmed
+        # Encodes the formula spelled out in
+        # princeps_node::metrics::PRINCEPS_LENDING_HALT_ARMED_UNTIL:
+        #   value > 0 AND value >= princeps_block_height
+        # "info, not page" per TD-006 — the halt IS the safety
+        # response, the operator just needs to know it fired and
+        # decide whether to lift it via a socialization declaration.
+        expr: |
+          princeps_lending_halt_armed_until > 0
+          and princeps_lending_halt_armed_until >= princeps_block_height
+        for: 0m
+        labels:
+          severity: info
+          area: lending
+        annotations:
+          summary: "Lending halt armed on {{ $labels.instance }}"
+          description: |
+            ADR-010 Layer 1 lending halt is currently armed on
+            {{ $labels.instance }} (armed_until = {{ $value }}).
+            Borrow/withdraw paths are gated until the halt expires
+            or is cleared. Review the insurance-fund balance and
+            unfilled-deficit gauges to decide whether a socialization
+            declaration (ADR-010 Layer 3) is appropriate.
+
+      - alert: PrincepsInsuranceFundNegative
+        # The metric's doc string warns that a negative balance
+        # means absorbed debt exceeded prior reserves — this is the
+        # precondition for needing Layer 3 socialization.
+        expr: princeps_insurance_fund_balance < 0
+        for: 5m
+        labels:
+          severity: warning
+          area: lending
+        annotations:
+          summary: "Insurance fund balance negative on {{ $labels.instance }}"
+          description: |
+            princeps_insurance_fund_balance has been negative for
+            5 minutes on {{ $labels.instance }} (current: {{ $value }}).
+            Absorbed bad debt has exceeded reserves. Operator should
+            evaluate whether to issue a socialization declaration
+            against the affected market(s).
+
+      - alert: PrincepsLiquidationUnfilledDeficit
+        # Per-tick gauge. Sustained non-zero means the liquidator
+        # pool is unable to clear underwater positions, which is the
+        # precursor to insurance-fund drawdown.
+        expr: princeps_liquidation_unfilled_deficit > 0
+        for: 5m
+        labels:
+          severity: warning
+          area: liquidation
+        annotations:
+          summary: "Liquidation scan leaving unfilled deficit on {{ $labels.instance }}"
+          description: |
+            princeps_liquidation_unfilled_deficit has been > 0 for
+            5 minutes on {{ $labels.instance }} (current: {{ $value }}).
+            Underwater positions are not being cleared by the
+            available liquidator pool. Expect insurance-fund
+            drawdown to follow if this persists.
+
+      - alert: PrincepsScanDurationDegrading
+        # Lower-severity counterpart to PrincepsScanApproachingBlockTime.
+        # The 250ms threshold matches the alert hint in the metric's
+        # constant doc — gives a 10-minute ticket-grade heads-up
+        # before the page-grade rule fires.
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, instance) (rate(princeps_scan_duration_seconds_bucket[5m]))
+          ) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+          area: performance
+        annotations:
+          summary: "Scan p99 > 250ms on {{ $labels.instance }}"
+          description: |
+            scan_unified p99 has exceeded 250ms for 10 minutes on
+            {{ $labels.instance }}. Not yet at the missed-block
+            risk threshold (500ms) but trending. Identify the
+            scan-loop hot path before it escalates.
