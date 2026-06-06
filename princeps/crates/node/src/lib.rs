@@ -680,8 +680,12 @@ impl PrincepsNode {
             },
             lending_halt_tripped_until,
         };
-        // T2a — emit per-tick metrics. No-op if no recorder is installed.
+        // T2a / T2b-c — emit per-tick metrics. No-op if no recorder
+        // is installed. record_tick covers TickReport-derived gauges/
+        // counters; record_node_state covers node-state gauges that
+        // don't appear in the report (currently insurance-fund balance).
         crate::metrics::record_tick(&report);
+        crate::metrics::record_node_state(self);
         report
     }
 

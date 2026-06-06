@@ -1611,6 +1611,10 @@ async fn run_reth_devnet(
     let coordinator_for_hook = coordinator.clone();
     let publishers_for_hook = publishers.clone();
     let bridge_for_hook = bridge.clone();
+    // T2b-c: clone the Arc so the move closure below can emit the
+    // chain-history gauge once per block. Cheap (Arc clone); the
+    // store itself is shared with the precompile dispatcher.
+    let chain_history_for_hook = chain_history_for_persist.clone();
     let app_task = tokio::spawn(async move {
         run_engine_app(
             bridge_for_engine,
@@ -1686,6 +1690,11 @@ async fn run_reth_devnet(
                 // (markets / positions / accounts) once per block.
                 // No-op if no metrics recorder is installed.
                 princeps_evm::metrics::record_bridge_state(bridge_for_hook.as_ref());
+                // T2b-c — emit the chain-history-length gauge. The
+                // node-side insurance-fund gauge is emitted inside
+                // node.tick (above) via record_node_state; chain-
+                // history lives in the bin so it's recorded here.
+                princeps_node::metrics::record_chain_history(&chain_history_for_hook);
 
                 // Per-block lending integration: accrue interest on every
                 // registered market, scan portfolio-wide for underwater

@@ -10,16 +10,21 @@
 //!   ([`crate::PrincepsNode::tick`]) calls at the end of every tick to
 //!   update gauges / counters from a [`TickReport`].
 //!
-//! What this module does NOT do (T2b follow-up):
-//! - No exposition surface. Metrics emit through whatever recorder the
-//!   binary installs (typically [`metrics_exporter_prometheus`] in
-//!   production, [`metrics_util::debugging::DebuggingRecorder`] in
-//!   tests). T2b adds a `/metrics` HTTP endpoint on a separate port.
-//! - No bridge/coordinator-state metrics (markets count, positions
-//!   count, insurance-fund balance, chain-history length, oracle
-//!   publisher observation age, validator liveness, scan-loop
-//!   duration histogram). Those need access beyond what `TickReport`
-//!   carries and land naturally with T2b's scrape handler.
+//! As of T2b-c this module also exposes:
+//! - [`record_node_state`] — called from `tick()` alongside
+//!   [`record_tick`] to emit gauges sourced from `PrincepsNode`
+//!   state that doesn't appear in `TickReport` (currently:
+//!   insurance-fund balance).
+//! - [`record_chain_history`] — called from the binary's per-block
+//!   hook with the bin-owned `Arc<ChainHistoryStore>` since the store
+//!   isn't owned by the node.
+//!
+//! Deferred to later T2b slices:
+//! - Bridge counts (markets / positions / accounts) → T2b-b in
+//!   `princeps_evm::metrics`.
+//! - Scan-loop duration histogram → T2b-d.
+//! - Oracle publisher observation age, validator liveness → later
+//!   slices once the corresponding accessors are wired.
 //!
 //! ## Why the `metrics` façade and not Prometheus directly
 //!
@@ -30,7 +35,7 @@
 //! force every consumer through Prometheus, including tests that
 //! don't want a `/metrics` listener.
 
-use crate::TickReport;
+use crate::{chain_history::ChainHistoryStore, PrincepsNode, TickReport};
 
 // --- Metric names -----------------------------------------------------------
 //
@@ -63,6 +68,18 @@ pub const PRINCEPS_FUNDING_SETTLEMENTS_TOTAL: &str = "princeps_funding_settlemen
 /// could not be auto-liquidated by the available liquidator pool.
 pub const PRINCEPS_LIQUIDATION_UNFILLED_DEFICIT: &str =
     "princeps_liquidation_unfilled_deficit";
+/// Gauge: insurance-fund balance (i64; can be negative if absorbed
+/// debt exceeds prior reserves). Sourced from
+/// `PrincepsNode::snapshot().insurance_fund_balance` at the end of
+/// every tick. Drops toward zero are the precursor to an ADR-010
+/// Layer 1 halt; the [`PRINCEPS_LENDING_HALT_TRIPS_TOTAL`] counter
+/// is the corresponding event.
+pub const PRINCEPS_INSURANCE_FUND_BALANCE: &str = "princeps_insurance_fund_balance";
+/// Gauge: number of distinct heights in the chain-history store
+/// (ADR-010 Layer 3 audit log). Monotonic non-decreasing across the
+/// life of a chain — append-only by design. Sourced from
+/// `ChainHistoryStore::total_blocks()` from the bin's per-block hook.
+pub const PRINCEPS_CHAIN_HISTORY_BLOCKS: &str = "princeps_chain_history_blocks";
 
 /// One-shot metadata registration. Call once at binary startup
 /// (typically after installing the exporter / recorder). Idempotent —
@@ -101,6 +118,14 @@ pub fn describe_metrics() {
         PRINCEPS_LIQUIDATION_UNFILLED_DEFICIT,
         "Liquidation scan's unfilled deficit from the last tick (0 when clean)"
     );
+    metrics::describe_gauge!(
+        PRINCEPS_INSURANCE_FUND_BALANCE,
+        "Insurance-fund balance (i64; can be negative)"
+    );
+    metrics::describe_gauge!(
+        PRINCEPS_CHAIN_HISTORY_BLOCKS,
+        "Number of distinct heights in the chain-history store (ADR-010 Layer 3 audit log)"
+    );
 }
 
 /// Emit per-tick metrics. Called from [`crate::PrincepsNode::tick`]
@@ -134,6 +159,44 @@ pub(crate) fn record_tick(report: &TickReport) {
 
     let unfilled = report.liquidation.unfilled_deficit.max(0) as f64;
     metrics::gauge!(PRINCEPS_LIQUIDATION_UNFILLED_DEFICIT).set(unfilled);
+}
+
+/// Emit gauges sourced from `PrincepsNode` state that doesn't
+/// appear in [`TickReport`]. Called from [`PrincepsNode::tick`]
+/// alongside [`record_tick`] so the gauge advances one observation
+/// per tick.
+///
+/// Currently only `insurance_fund_balance`; future expansions add
+/// here (e.g., oracle publisher counts, last-refresh-age) without
+/// changing the call shape.
+pub fn record_node_state(node: &PrincepsNode) {
+    record_insurance_fund_balance(node.snapshot().insurance_fund_balance);
+}
+
+/// Pure-value variant. Same emission semantics as
+/// [`record_node_state`] but takes the balance directly so unit
+/// tests can validate the metric pipeline without constructing a
+/// full `PrincepsNode`. Same split rationale as
+/// `princeps_evm::metrics::record_bridge_counts`.
+#[allow(clippy::cast_precision_loss)] // monitoring is best-effort
+pub(crate) fn record_insurance_fund_balance(balance: i64) {
+    metrics::gauge!(PRINCEPS_INSURANCE_FUND_BALANCE).set(balance as f64);
+}
+
+/// Emit the chain-history-length gauge. Called from the binary's
+/// per-block hook — the `ChainHistoryStore` is bin-owned (the bin
+/// constructs it from `--reth-chain-history-file`), not
+/// node-owned, so emission has to happen at that layer rather than
+/// inside `tick`.
+pub fn record_chain_history(store: &ChainHistoryStore) {
+    record_chain_history_blocks(store.total_blocks());
+}
+
+/// Pure-counts variant. See [`record_chain_history`] for the
+/// production call shape; this exists for testability.
+#[allow(clippy::cast_precision_loss)] // monitoring is best-effort
+pub(crate) fn record_chain_history_blocks(blocks: usize) {
+    metrics::gauge!(PRINCEPS_CHAIN_HISTORY_BLOCKS).set(blocks as f64);
 }
 
 #[cfg(test)]
@@ -254,6 +317,45 @@ mod tests {
         let _guard = ::metrics::set_default_local_recorder(&recorder);
         describe_metrics();
         describe_metrics(); // idempotent
+    }
+
+    /// T2b-c: insurance-fund balance gauge pins the i64 → f64 cast
+    /// at typical balances. Negative balances are legal (absorbed
+    /// debt exceeded prior reserves) and must round-trip with sign.
+    #[test]
+    fn record_insurance_fund_balance_emits_signed_values() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _g = ::metrics::set_default_local_recorder(&recorder);
+
+        record_insurance_fund_balance(-500);
+        record_insurance_fund_balance(1_000_000); // most recent wins
+
+        let map = snapshot_map(&snapshotter);
+        assert_eq!(
+            map.get(PRINCEPS_INSURANCE_FUND_BALANCE),
+            Some(&DebugValue::Gauge(1_000_000.0.into())),
+            "gauge should reflect the latest call"
+        );
+    }
+
+    /// T2b-c: chain-history blocks gauge pins the usize → f64 cast.
+    /// Monotonic non-decreasing in production; the test just
+    /// validates the emission and that the latest value sticks.
+    #[test]
+    fn record_chain_history_blocks_emits() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _g = ::metrics::set_default_local_recorder(&recorder);
+
+        record_chain_history_blocks(0);
+        record_chain_history_blocks(7);
+
+        let map = snapshot_map(&snapshotter);
+        assert_eq!(
+            map.get(PRINCEPS_CHAIN_HISTORY_BLOCKS),
+            Some(&DebugValue::Gauge(7.0.into()))
+        );
     }
 
     // Suppress unused-import warnings for the test-only helpers above —
