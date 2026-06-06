@@ -51,6 +51,7 @@ pub(crate) fn init_observability(bind: SocketAddr) -> eyre::Result<()> {
         .map_err(|e| eyre::eyre!("failed to install prometheus exporter on {bind}: {e}"))?;
 
     princeps_node::metrics::describe_metrics();
+    princeps_evm::metrics::describe_metrics();
 
     Ok(())
 }

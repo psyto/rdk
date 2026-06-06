@@ -1,6 +1,7 @@
 pub mod engine;
 pub mod in_memory;
 pub mod live_node;
+pub mod metrics;
 pub mod princeps_evm;
 pub mod precompiles;
 pub mod reth_node;

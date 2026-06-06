@@ -1682,6 +1682,11 @@ async fn run_reth_devnet(
                 println!("  mark = {} ({mark_source})", mark.0);
                 print_tick_report(&report);
 
+                // T2b-b — refresh the bridge-state gauges
+                // (markets / positions / accounts) once per block.
+                // No-op if no metrics recorder is installed.
+                princeps_evm::metrics::record_bridge_state(bridge_for_hook.as_ref());
+
                 // Per-block lending integration: accrue interest on every
                 // registered market, scan portfolio-wide for underwater
                 // accounts (perp + lending unified), and route any

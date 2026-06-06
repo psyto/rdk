@@ -19,6 +19,7 @@ rdk-funding              = { workspace = true }
 async-trait              = { workspace = true }
 eyre                     = { workspace = true }
 thiserror                = { workspace = true }
+metrics                  = { workspace = true }
 alloy-primitives         = { workspace = true, features = ["serde"] }
 alloy-consensus          = { workspace = true, features = ["serde"] }
 serde                    = { workspace = true }
@@ -49,6 +50,8 @@ alloy-genesis        = { workspace = true }
 criterion            = { workspace = true }
 proptest             = { workspace = true }
 tempfile             = "3"
+metrics              = { workspace = true }
+metrics-util         = { workspace = true }
 
 [[bench]]
 name    = "lending_precompiles"
