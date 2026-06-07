@@ -21,6 +21,7 @@
 
 mod config;
 mod observability;
+mod rate_limit;
 mod server;
 
 use std::path::PathBuf;

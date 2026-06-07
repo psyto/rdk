@@ -14,10 +14,12 @@
 
 use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eyre::Context as _;
 use serde::{Deserialize, Serialize};
+
+use crate::rate_limit::RateLimitConfig;
 
 /// The on-disk faucet config.
 ///
@@ -50,6 +52,17 @@ pub(crate) struct FaucetConfig {
     /// field in `testnet-genesis.json` (placeholder `424242` until
     /// T1a allocates the real number).
     pub chain_id: u64,
+
+    /// Rate-limit knobs (T4a-2). All three dimensions
+    /// (per-IP, per-recipient, global) are required — see
+    /// [`RateLimitConfig`] for the rationale.
+    pub rate_limit: RateLimitConfig,
+
+    /// Path to the SQLite database that backs the rate limiter.
+    /// Created (with parents) on first boot. Production deploys
+    /// put this on durable storage so rate-limit state survives
+    /// faucet restarts.
+    pub state_db_path: PathBuf,
 }
 
 impl FaucetConfig {
@@ -76,24 +89,47 @@ mod tests {
         path
     }
 
+    /// Common rate-limit + state path block, factored so each
+    /// test body stays readable.
+    const RATE_LIMIT_BLOCK: &str = r#"
+        "rate_limit": {
+            "per_ip_window_secs": 86400,
+            "per_ip_max_drips": 1,
+            "per_recipient_window_secs": 86400,
+            "per_recipient_max_drips": 1,
+            "global_window_secs": 3600,
+            "global_max_drips": 100
+        },
+        "state_db_path": "/var/lib/princeps-faucet/state.db"
+    "#;
+
     /// Round-trip: full-shape config parses, re-serializes,
     /// re-parses identical. Pins the on-disk format so any future
     /// field add/rename surfaces here.
     #[test]
     fn round_trip_preserves_fields() {
         let dir = TempDir::new().unwrap();
-        let body = r#"{
-            "_comment": ["first-cut faucet config for v0"],
-            "listen_addr": "127.0.0.1:8080",
-            "metrics_bind": "127.0.0.1:9091",
-            "chain_id": 424242
-        }"#;
-        let path = write_config(&dir, body);
+        let body = format!(
+            r#"{{
+                "_comment": ["first-cut faucet config for v0"],
+                "listen_addr": "127.0.0.1:8080",
+                "metrics_bind": "127.0.0.1:9091",
+                "chain_id": 424242,
+                {RATE_LIMIT_BLOCK}
+            }}"#
+        );
+        let path = write_config(&dir, &body);
         let cfg = FaucetConfig::load(&path).expect("load");
         assert_eq!(cfg.chain_id, 424242);
         assert_eq!(cfg.listen_addr.port(), 8080);
         assert_eq!(cfg.metrics_bind.unwrap().port(), 9091);
         assert_eq!(cfg.comment, vec!["first-cut faucet config for v0"]);
+        assert_eq!(cfg.rate_limit.per_ip_max_drips, 1);
+        assert_eq!(cfg.rate_limit.global_max_drips, 100);
+        assert_eq!(
+            cfg.state_db_path,
+            std::path::PathBuf::from("/var/lib/princeps-faucet/state.db"),
+        );
 
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         let reparsed: FaucetConfig = serde_json::from_str(&json).unwrap();
@@ -101,6 +137,11 @@ mod tests {
         assert_eq!(reparsed.listen_addr, cfg.listen_addr);
         assert_eq!(reparsed.metrics_bind, cfg.metrics_bind);
         assert_eq!(reparsed.comment, cfg.comment);
+        assert_eq!(
+            reparsed.rate_limit.per_ip_max_drips,
+            cfg.rate_limit.per_ip_max_drips
+        );
+        assert_eq!(reparsed.state_db_path, cfg.state_db_path);
     }
 
     /// `metrics_bind` and `_comment` are optional. A bare-bones
@@ -108,11 +149,14 @@ mod tests {
     #[test]
     fn omits_optional_fields_cleanly() {
         let dir = TempDir::new().unwrap();
-        let body = r#"{
-            "listen_addr": "0.0.0.0:8080",
-            "chain_id": 424242
-        }"#;
-        let path = write_config(&dir, body);
+        let body = format!(
+            r#"{{
+                "listen_addr": "0.0.0.0:8080",
+                "chain_id": 424242,
+                {RATE_LIMIT_BLOCK}
+            }}"#
+        );
+        let path = write_config(&dir, &body);
         let cfg = FaucetConfig::load(&path).expect("load");
         assert!(cfg.metrics_bind.is_none());
         assert!(cfg.comment.is_empty());
@@ -123,12 +167,33 @@ mod tests {
     #[test]
     fn missing_required_field_errors_with_path() {
         let dir = TempDir::new().unwrap();
-        let body = r#"{ "listen_addr": "127.0.0.1:8080" }"#; // missing chain_id
-        let path = write_config(&dir, body);
+        // Missing chain_id — every other required field present.
+        let body = format!(
+            r#"{{
+                "listen_addr": "127.0.0.1:8080",
+                {RATE_LIMIT_BLOCK}
+            }}"#
+        );
+        let path = write_config(&dir, &body);
         let err = FaucetConfig::load(&path).expect_err("must error");
         let msg = err.to_string();
         assert!(msg.contains("malformed faucet config"), "msg: {msg}");
         assert!(msg.contains(&path.display().to_string()), "msg: {msg}");
+    }
+
+    /// Missing the rate-limit block is also a required-field
+    /// error — proves the new T4a-2 fields are mandatory.
+    #[test]
+    fn missing_rate_limit_block_is_required() {
+        let dir = TempDir::new().unwrap();
+        let body = r#"{
+            "listen_addr": "127.0.0.1:8080",
+            "chain_id": 424242,
+            "state_db_path": "/tmp/state.db"
+        }"#;
+        let path = write_config(&dir, body);
+        let err = FaucetConfig::load(&path).expect_err("must error");
+        assert!(err.to_string().contains("malformed faucet config"));
     }
 
     /// Missing file → error naming the path. Distinct from the

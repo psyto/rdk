@@ -26,11 +26,18 @@ use tracing::info;
 
 use crate::config::FaucetConfig;
 use crate::observability;
+use crate::rate_limit::SqliteRateLimiter;
 
 #[derive(Clone)]
 struct AppState {
     config: Arc<FaucetConfig>,
     started_at: Instant,
+    /// SQLite-backed rate limiter. Constructed once at `serve`
+    /// time, shared across requests via cheap clones (the inner
+    /// connection is `Arc<Mutex<...>>`). T4a-3 wires this into
+    /// `POST /drip`.
+    #[allow(dead_code)] // first caller lands in T4a-3
+    rate_limiter: SqliteRateLimiter,
 }
 
 /// Top-level serve loop. Binds the configured listener, installs
@@ -45,6 +52,13 @@ pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
         info!("metrics endpoint: http://{metrics_bind}/metrics");
     }
 
+    // Open the rate-limit DB before binding the HTTP listener
+    // so a misconfigured state_db_path produces a clean boot
+    // failure rather than a successful boot that serves 500s.
+    let rate_limiter =
+        SqliteRateLimiter::open(&config.state_db_path, config.rate_limit)?;
+    info!("rate-limit state: {}", config.state_db_path.display());
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
         .map_err(|e| {
@@ -55,6 +69,7 @@ pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
     let state = AppState {
         config: Arc::new(config),
         started_at: Instant::now(),
+        rate_limiter,
     };
     let app = build_router(state);
 
@@ -101,6 +116,22 @@ struct StatusResponse {
     /// Seconds since `serve` started. Useful for
     /// "did the faucet just restart?" telemetry.
     uptime_secs: u64,
+    /// Configured rate limits. Surfaced so callers know what
+    /// they're up against before submitting `POST /drip`.
+    /// Deliberately publishes the *configured* limits, not the
+    /// *current* row counts — leaking row counts would leak
+    /// faucet-drain progress to a scripted attacker.
+    rate_limits: RateLimitSummary,
+}
+
+#[derive(Serialize)]
+struct RateLimitSummary {
+    per_ip_max_drips: u32,
+    per_ip_window_secs: u64,
+    per_recipient_max_drips: u32,
+    per_recipient_window_secs: u64,
+    global_max_drips: u32,
+    global_window_secs: u64,
 }
 
 /// Operational status. Read-only; safe to expose to the public
@@ -109,11 +140,20 @@ struct StatusResponse {
 /// balance, no rate-limit table state, nothing that would leak
 /// faucet-drain progress.
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
+    let rl = state.config.rate_limit;
     Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),
         chain_id: state.config.chain_id,
         listen_addr: state.config.listen_addr.to_string(),
         uptime_secs: state.started_at.elapsed().as_secs(),
+        rate_limits: RateLimitSummary {
+            per_ip_max_drips: rl.per_ip_max_drips,
+            per_ip_window_secs: rl.per_ip_window_secs,
+            per_recipient_max_drips: rl.per_recipient_max_drips,
+            per_recipient_window_secs: rl.per_recipient_window_secs,
+            global_max_drips: rl.global_max_drips,
+            global_window_secs: rl.global_window_secs,
+        },
     })
 }
 
@@ -126,14 +166,18 @@ mod tests {
     use tower::ServiceExt as _;
 
     fn test_state() -> AppState {
+        let rate_limit = crate::rate_limit::RateLimitConfig::testnet_defaults();
         AppState {
             config: Arc::new(FaucetConfig {
                 comment: Vec::new(),
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 metrics_bind: None,
                 chain_id: 424242,
+                rate_limit,
+                state_db_path: std::path::PathBuf::from(":memory:"),
             }),
             started_at: Instant::now(),
+            rate_limiter: SqliteRateLimiter::open_in_memory(rate_limit).unwrap(),
         }
     }
 
@@ -178,6 +222,15 @@ mod tests {
             body["uptime_secs"].is_u64(),
             "uptime_secs must be u64: {body}"
         );
+        // T4a-2: rate-limit summary surfaced — exposes the
+        // testnet defaults wired in test_state.
+        let rl = &body["rate_limits"];
+        assert_eq!(rl["per_ip_max_drips"], 1);
+        assert_eq!(rl["per_ip_window_secs"], 86400);
+        assert_eq!(rl["per_recipient_max_drips"], 1);
+        assert_eq!(rl["per_recipient_window_secs"], 86400);
+        assert_eq!(rl["global_max_drips"], 100);
+        assert_eq!(rl["global_window_secs"], 3600);
     }
 
     /// Unknown route returns 404 (axum default). Pins the
