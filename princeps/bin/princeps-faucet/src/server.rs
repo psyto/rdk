@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::captcha::{self, CaptchaError, CaptchaVerifier};
+use crate::chain::{AlloyEthSender, EthSender, SendError};
 use crate::config::FaucetConfig;
 use crate::observability;
 use crate::rate_limit::{RateLimitRejection, SqliteRateLimiter};
@@ -44,6 +45,9 @@ struct AppState {
     /// (HCaptchaVerifier) and local-dev (DisabledVerifier) and
     /// tests (MockCaptchaVerifier) all flow through one shape.
     captcha_verifier: Arc<dyn CaptchaVerifier>,
+    /// Chain transfer. AlloyEthSender in production,
+    /// MockEthSender in tests.
+    eth_sender: Arc<dyn EthSender>,
 }
 
 /// Top-level serve loop. Binds the configured listener, installs
@@ -52,7 +56,10 @@ struct AppState {
 /// surfaced as a plain error return from `axum::serve`; graceful
 /// shutdown wiring lands when there's mutable state worth
 /// flushing).
-pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
+pub(crate) async fn serve(
+    config: FaucetConfig,
+    wallet_passphrase: String,
+) -> eyre::Result<()> {
     if let Some(metrics_bind) = config.metrics_bind {
         observability::init_observability(metrics_bind)?;
         info!("metrics endpoint: http://{metrics_bind}/metrics");
@@ -70,6 +77,19 @@ pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
     // log makes a misconfigured production deploy visible.
     let captcha_verifier = captcha::build_verifier(&config.captcha);
 
+    // T4a-5: load the wallet + build the chain sender BEFORE
+    // binding the HTTP listener. A misconfigured keystore or
+    // RPC URL must fail at boot, not at the first drip.
+    let wallet = crate::chain::load_wallet(
+        &config.chain.wallet_keystore_path,
+        wallet_passphrase.as_bytes(),
+    )?;
+    info!("wallet keystore loaded: address={}", wallet.address);
+    let alloy_sender =
+        AlloyEthSender::new(wallet, config.chain.rpc_url.clone(), config.chain_id)?;
+    alloy_sender.verify_chain_id().await?;
+    let eth_sender: Arc<dyn EthSender> = Arc::new(alloy_sender);
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
         .map_err(|e| {
@@ -82,6 +102,7 @@ pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
         started_at: Instant::now(),
         rate_limiter,
         captcha_verifier,
+        eth_sender,
     };
     let app = build_router(state);
 
@@ -233,9 +254,31 @@ enum FaucetError {
     /// Rate limiter said no. Variant carries the specific
     /// dimension hit so the response is informative.
     RateLimited(RateLimitRejection),
+    /// Chain RPC was unreachable, returned a JSON-RPC error,
+    /// or rejected the signed transaction. 503 to the client;
+    /// the root cause is logged at error!. Distinct from the
+    /// captcha-unreachable variant so alert rules can separate
+    /// the two infra dependencies.
+    ChainUnavailable(String),
     /// SQLite error or any other unexpected failure. The inner
     /// error is logged at `error!`; the response is generic.
     Internal(eyre::Report),
+}
+
+impl From<SendError> for FaucetError {
+    fn from(e: SendError) -> Self {
+        match e {
+            // Rpc / RpcError both mean the chain is unavailable
+            // for this drip — bucket them together client-side.
+            // The server-side log distinguishes via the message.
+            SendError::Rpc(s) => Self::ChainUnavailable(format!("rpc: {s}")),
+            SendError::RpcError { reason } => {
+                Self::ChainUnavailable(format!("rpc returned error: {reason}"))
+            }
+            SendError::Sign(s) => Self::Internal(eyre::eyre!("signing failed: {s}")),
+            SendError::Internal(s) => Self::Internal(eyre::eyre!("send_eth internal: {s}")),
+        }
+    }
 }
 
 impl From<CaptchaError> for FaucetError {
@@ -283,6 +326,16 @@ impl IntoResponse for FaucetError {
                 StatusCode::TOO_MANY_REQUESTS,
                 serde_json::json!({ "error": r.to_string(), "code": "rate_limited" }),
             ),
+            Self::ChainUnavailable(reason) => {
+                tracing::error!("chain transfer failed: {reason}");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    serde_json::json!({
+                        "error": "chain transfer failed",
+                        "code": "chain_unavailable",
+                    }),
+                )
+            }
             Self::Internal(e) => {
                 tracing::error!("faucet internal error: {e:?}");
                 (
@@ -369,9 +422,20 @@ async fn drip(
         return Err(FaucetError::RateLimited(rejection));
     }
 
+    // T4a-5: real broadcast. The recipient was normalized to
+    // lowercase 0x... above; alloy's Address::from_str accepts
+    // both the lowercase and EIP-55 mixed-case forms.
+    let recipient_addr: alloy_primitives::Address = recipient
+        .parse()
+        .map_err(|e| FaucetError::Internal(eyre::eyre!("parse recipient: {e}")))?;
+    let amount_wei = alloy_primitives::U256::from(state.config.drip.eth_amount_wei);
+    let tx_hash = state
+        .eth_sender
+        .send_eth(recipient_addr, amount_wei)
+        .await?;
+
     Ok(Json(DripResponse {
-        // T4a-3 stub. T4a-5 swaps this for the real broadcast hash.
-        tx_hash: format!("0x{}", "0".repeat(64)),
+        tx_hash: format!("0x{}", hex::encode(tx_hash.as_slice())),
         recipient,
         eth_amount_wei: state.config.drip.eth_amount_wei,
         usdc_amount_base_units: state.config.drip.usdc_amount_base_units,
@@ -414,6 +478,23 @@ mod tests {
     }
 
     fn test_state_with_verifier(verifier: Arc<dyn CaptchaVerifier>) -> AppState {
+        test_state_with_components(
+            verifier,
+            Arc::new(crate::chain::MockEthSender::always_succeed()),
+        )
+    }
+
+    fn test_state_with_sender(sender: Arc<dyn EthSender>) -> AppState {
+        test_state_with_components(
+            Arc::new(crate::captcha::MockCaptchaVerifier::always_pass()),
+            sender,
+        )
+    }
+
+    fn test_state_with_components(
+        verifier: Arc<dyn CaptchaVerifier>,
+        sender: Arc<dyn EthSender>,
+    ) -> AppState {
         let rate_limit = crate::rate_limit::RateLimitConfig::testnet_defaults();
         AppState {
             config: Arc::new(FaucetConfig {
@@ -428,10 +509,15 @@ mod tests {
                     usdc_amount_base_units: 10_000_000_000,
                 },
                 captcha: crate::captcha::CaptchaConfig::Disabled,
+                chain: crate::config::ChainConfig {
+                    rpc_url: "http://127.0.0.1:8545".to_string(),
+                    wallet_keystore_path: std::path::PathBuf::from("/dev/null"),
+                },
             }),
             started_at: Instant::now(),
             rate_limiter: SqliteRateLimiter::open_in_memory(rate_limit).unwrap(),
             captcha_verifier: verifier,
+            eth_sender: sender,
         }
     }
 
@@ -605,10 +691,12 @@ mod tests {
         }"#;
         let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
+        // T4a-5: the MockEthSender::always_succeed returns
+        // 0xab repeated. Replaces the T4a-3 all-zero stub.
         assert_eq!(
             json["tx_hash"],
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "T4a-3 stubs the tx hash; T4a-5 returns real broadcast hash"
+            format!("0x{}", "ab".repeat(32)),
+            "MockEthSender returns the fixed test hash",
         );
         assert_eq!(
             json["recipient"], "0xabcdef1234567890abcdef1234567890abcdef12",
@@ -672,6 +760,34 @@ mod tests {
         let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json["code"], "captcha_unreachable");
+    }
+
+    /// T4a-5: chain RPC unavailable → 503 with code
+    /// chain_unavailable. Maps SendError::Rpc through to the
+    /// client + logs the reason.
+    #[tokio::test]
+    async fn drip_chain_unreachable_returns_503() {
+        let state = test_state_with_sender(Arc::new(
+            crate::chain::MockEthSender::rpc_unreachable("connection refused"),
+        ));
+        let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12", "captcha_token": "x"}"#;
+        let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["code"], "chain_unavailable");
+    }
+
+    /// T4a-5: RPC returned a JSON-RPC error envelope (e.g.
+    /// nonce too low, insufficient funds). Same 503 surface,
+    /// distinct from the transport-layer error above.
+    #[tokio::test]
+    async fn drip_chain_rpc_error_returns_503() {
+        let state = test_state_with_sender(Arc::new(
+            crate::chain::MockEthSender::rpc_error("insufficient funds"),
+        ));
+        let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12", "captcha_token": "x"}"#;
+        let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["code"], "chain_unavailable");
     }
 
     /// T4a-4: failing captcha must NOT consume the user's

@@ -48,9 +48,29 @@
     "                   here so the deployment runbook has it in",
     "                   one place.",
     "",
-    "Fields landing in later slices:",
-    "  T4a-5 — chain { rpc_url, faucet_keystore_path } and the",
-    "          paired --faucet-keystore-passphrase-* flags."
+    "T4a-5 fields:",
+    "  chain          — { rpc_url, wallet_keystore_path }. rpc_url",
+    "                   is the JSON-RPC endpoint the faucet posts",
+    "                   eth_sendRawTransaction to (typically a",
+    "                   read-only `princeps-lending-rpc-server`",
+    "                   follower per TD-004, or a validator RPC).",
+    "                   wallet_keystore_path is an Ethereum Web3 V3",
+    "                   keystore — mint with `cast wallet new",
+    "                   --password ...` or geth's `account new`.",
+    "                   At boot, --wallet-keystore-passphrase-file",
+    "                   <path> OR --wallet-keystore-passphrase-stdin",
+    "                   is REQUIRED; the faucet refuses to start",
+    "                   without one of them.",
+    "",
+    "                   USDC is OUT OF SCOPE at T4a-5: USDC on",
+    "                   this chain is bridge-side accounting",
+    "                   indexed by AccountId(u64), not an ERC-20",
+    "                   address. Until the address-to-AccountId",
+    "                   convention is settled at the system level",
+    "                   the faucet ships ETH-only and the",
+    "                   drip.usdc_amount_base_units is informational",
+    "                   only (the field round-trips through the API",
+    "                   but no USDC is actually credited)."
   ],
   "listen_addr": "127.0.0.1:8080",
   "metrics_bind": "127.0.0.1:9091",
@@ -70,5 +90,9 @@
   },
   "captcha": {
     "provider": "disabled"
+  },
+  "chain": {
+    "rpc_url": "http://127.0.0.1:8545",
+    "wallet_keystore_path": "/etc/princeps-faucet/wallet-keystore.json"
   }
 }

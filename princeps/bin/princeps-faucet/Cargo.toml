@@ -25,6 +25,13 @@ metrics-exporter-prometheus = { workspace = true }
 rusqlite           = { version = "0.32", features = ["bundled"] }
 reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 async-trait        = { workspace = true }
+alloy-primitives   = { workspace = true, default-features = false, features = ["std"] }
+alloy-consensus    = { workspace = true, default-features = false, features = ["std", "k256"] }
+alloy-signer       = { workspace = true }
+alloy-signer-local = { workspace = true, features = ["keystore"] }
+alloy-network      = { workspace = true }
+alloy-rlp          = { workspace = true }
+hex                = "0.4"
 
 [dev-dependencies]
 tempfile       = "3"

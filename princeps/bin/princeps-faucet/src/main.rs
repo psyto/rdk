@@ -20,6 +20,7 @@
 //!   middleware (rate limiting, request logging, etc.).
 
 mod captcha;
+mod chain;
 mod config;
 mod observability;
 mod rate_limit;
@@ -47,6 +48,19 @@ enum Command {
         /// committed reference shape.
         #[arg(long)]
         config: PathBuf,
+
+        /// Read the wallet-keystore passphrase from this file
+        /// (single line, trailing newline stripped). The
+        /// production path for systemd unit files using
+        /// `LoadCredential=`.
+        #[arg(long)]
+        wallet_keystore_passphrase_file: Option<PathBuf>,
+
+        /// Read the wallet-keystore passphrase from stdin (one
+        /// line, trailing newline stripped). For CI / scripted
+        /// boots. Mutually exclusive with the file flag above.
+        #[arg(long, default_value_t = false)]
+        wallet_keystore_passphrase_stdin: bool,
     },
 }
 
@@ -63,9 +77,61 @@ fn main() -> eyre::Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve { config } => {
+        Command::Serve {
+            config,
+            wallet_keystore_passphrase_file,
+            wallet_keystore_passphrase_stdin,
+        } => {
+            let passphrase = read_wallet_passphrase(
+                wallet_keystore_passphrase_file.as_deref(),
+                wallet_keystore_passphrase_stdin,
+            )?;
             let cfg = config::FaucetConfig::load(&config)?;
-            tokio_rt()?.block_on(server::serve(cfg))
+            tokio_rt()?.block_on(server::serve(cfg, passphrase))
+        }
+    }
+}
+
+/// Source the wallet-keystore passphrase. Exactly one of the
+/// two flags must be set — the production path is `--file`
+/// (systemd `LoadCredential=`); `--stdin` covers CI. TTY input
+/// is intentionally NOT supported here: the faucet is a daemon,
+/// not an interactive tool.
+fn read_wallet_passphrase(
+    file: Option<&std::path::Path>,
+    stdin: bool,
+) -> eyre::Result<String> {
+    match (file, stdin) {
+        (Some(_), true) => eyre::bail!(
+            "--wallet-keystore-passphrase-file and \
+             --wallet-keystore-passphrase-stdin are mutually exclusive"
+        ),
+        (None, false) => eyre::bail!(
+            "wallet passphrase required: pass either \
+             --wallet-keystore-passphrase-file <path> or \
+             --wallet-keystore-passphrase-stdin"
+        ),
+        (Some(path), false) => {
+            let bytes = std::fs::read(path)
+                .map_err(|e| eyre::eyre!("read passphrase file {}: {e}", path.display()))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|e| eyre::eyre!("passphrase file must be valid UTF-8: {e}"))?;
+            let trimmed = text.trim_end_matches(['\n', '\r']).to_string();
+            if trimmed.is_empty() {
+                eyre::bail!("passphrase file {} is empty", path.display());
+            }
+            Ok(trimmed)
+        }
+        (None, true) => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_line(&mut buf)
+                .map_err(|e| eyre::eyre!("read passphrase from stdin: {e}"))?;
+            let trimmed = buf.trim_end_matches(['\n', '\r']).to_string();
+            if trimmed.is_empty() {
+                eyre::bail!("passphrase read from stdin was empty");
+            }
+            Ok(trimmed)
         }
     }
 }

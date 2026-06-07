@@ -72,6 +72,33 @@ pub(crate) struct FaucetConfig {
     /// production deployments MUST set `Hcaptcha { secret, .. }`.
     /// See [`CaptchaConfig`] for the wire shape.
     pub captcha: CaptchaConfig,
+
+    /// Chain connection + wallet (T4a-5). Used to sign and
+    /// broadcast the EIP-1559 transfer that lands at the
+    /// recipient address.
+    pub chain: ChainConfig,
+}
+
+/// On-disk shape of the `chain` block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ChainConfig {
+    /// JSON-RPC URL the faucet posts to. Production deploys
+    /// point this at a public read-only `princeps-lending-rpc-server`
+    /// follower (per [TD-004](../../docs/plans/v0-testnet-deploy.md))
+    /// or directly at a validator's RPC endpoint. The faucet
+    /// validates `eth_chainId` at boot against
+    /// [`FaucetConfig::chain_id`] and refuses to start on
+    /// mismatch.
+    pub rpc_url: String,
+
+    /// Path to the Web3 V3 (scrypt + AES-128-CTR) keystore file
+    /// holding the faucet wallet's secp256k1 private key.
+    /// Operators mint this with any Ethereum-ecosystem tool
+    /// (`cast wallet new --password ...`, geth's `account
+    /// new`, foundry, etc.) — the faucet itself does not yet
+    /// ship a `gen-wallet` subcommand. T4a-2's validator-
+    /// keystore CLI is Ed25519-specific and not reusable here.
+    pub wallet_keystore_path: std::path::PathBuf,
 }
 
 /// Per-drip amounts. Wei + USDC base units are u128 to cover
@@ -154,7 +181,11 @@ mod tests {
             "eth_amount_wei": "100000000000000000",
             "usdc_amount_base_units": "10000000000"
         },
-        "captcha": { "provider": "disabled" }
+        "captcha": { "provider": "disabled" },
+        "chain": {
+            "rpc_url": "http://127.0.0.1:8545",
+            "wallet_keystore_path": "/etc/princeps-faucet/wallet-keystore.json"
+        }
     "#;
 
     /// Round-trip: full-shape config parses, re-serializes,
@@ -190,6 +221,12 @@ mod tests {
         // T4a-4 captcha block parses into the Disabled variant
         // when "provider": "disabled".
         assert!(matches!(cfg.captcha, CaptchaConfig::Disabled));
+        // T4a-5 chain block carries rpc_url + keystore path.
+        assert_eq!(cfg.chain.rpc_url, "http://127.0.0.1:8545");
+        assert_eq!(
+            cfg.chain.wallet_keystore_path,
+            std::path::PathBuf::from("/etc/princeps-faucet/wallet-keystore.json"),
+        );
 
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         let reparsed: FaucetConfig = serde_json::from_str(&json).unwrap();
@@ -303,7 +340,11 @@ mod tests {
                 "eth_amount_wei": 100000000000000000,
                 "usdc_amount_base_units": "10000000000"
             },
-            "captcha": { "provider": "disabled" }
+            "captcha": { "provider": "disabled" },
+            "chain": {
+                "rpc_url": "http://127.0.0.1:8545",
+                "wallet_keystore_path": "/etc/princeps-faucet/wallet-keystore.json"
+            }
         }"#;
         let path = write_config(&dir, body);
         let err = FaucetConfig::load(&path).expect_err("numeric form must error");
@@ -331,7 +372,11 @@ mod tests {
                 "eth_amount_wei": "0.1",
                 "usdc_amount_base_units": "10000"
             },
-            "captcha": { "provider": "disabled" }
+            "captcha": { "provider": "disabled" },
+            "chain": {
+                "rpc_url": "http://127.0.0.1:8545",
+                "wallet_keystore_path": "/etc/princeps-faucet/wallet-keystore.json"
+            }
         }"#;
         let path = write_config(&dir, body);
         let err = FaucetConfig::load(&path).expect_err("must error");

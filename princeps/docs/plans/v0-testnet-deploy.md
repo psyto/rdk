@@ -52,6 +52,8 @@ Today the node emits `tracing` events only. Add a `/metrics` Prometheus endpoint
 
 Testnet USDC + testnet ETH faucet implemented as a small HTTP service that holds a faucet key and submits standard transfers via JSON-RPC. Rate-limit per IP + per recipient. Captcha to keep cost down. Standalone deploy — faucet outage doesn't degrade the chain.
 
+**T4a-5 scope deviation: ETH-only.** USDC on the testnet is bridge-side accounting indexed by `AccountId(u64)`, not an ERC-20 at an EVM address. Crediting USDC to an external user requires a convention for mapping the user's `0x...` address to an `AccountId`, and no such convention exists at the system level yet — letting the faucet pick one unilaterally would lock in a choice that affects every downstream bridge flow (deposit, borrow, withdraw, liquidation). T4a-5 ships ETH-only via standard EIP-1559 transfers; USDC lands in a later slice once the address↔AccountId story is settled (probably alongside the runtime registration RPC called out as open work in the operator manual). Open question for the v1 mainnet plan: do we deploy USDC as an ERC-20 contract (collapses the mapping problem) or codify the address↔AccountId convention.
+
 ### TD-008 — Snapshot strategy: per-block coordinator snapshot + periodic full-state archive
 
 Coordinator snapshots already persist across restart (Stage 18a). Testnet adds a per-N-block tarball of `{coordinator-snapshot, bridge-snapshot, chain-history.jsonl}` uploaded to object storage, retained 30 days. This is what restores a validator from cold or onboards a 4th validator without re-syncing genesis.
