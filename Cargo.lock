@@ -4123,6 +4123,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -7177,12 +7178,14 @@ dependencies = [
 name = "princeps-faucet"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum 0.7.9",
  "clap",
  "eyre",
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
@@ -7886,6 +7889,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use eyre::Context as _;
 use serde::{Deserialize, Serialize};
 
+use crate::captcha::CaptchaConfig;
 use crate::rate_limit::RateLimitConfig;
 
 /// The on-disk faucet config.
@@ -66,6 +67,11 @@ pub(crate) struct FaucetConfig {
 
     /// How much each successful drip dispenses (T4a-3).
     pub drip: DripAmounts,
+
+    /// Captcha provider (T4a-4). `Disabled` for local dev only;
+    /// production deployments MUST set `Hcaptcha { secret, .. }`.
+    /// See [`CaptchaConfig`] for the wire shape.
+    pub captcha: CaptchaConfig,
 }
 
 /// Per-drip amounts. Wei + USDC base units are u128 to cover
@@ -147,7 +153,8 @@ mod tests {
         "drip": {
             "eth_amount_wei": "100000000000000000",
             "usdc_amount_base_units": "10000000000"
-        }
+        },
+        "captcha": { "provider": "disabled" }
     "#;
 
     /// Round-trip: full-shape config parses, re-serializes,
@@ -180,6 +187,9 @@ mod tests {
         // T4a-3 drip amounts round-trip as u128 from JSON strings.
         assert_eq!(cfg.drip.eth_amount_wei, 100_000_000_000_000_000);
         assert_eq!(cfg.drip.usdc_amount_base_units, 10_000_000_000);
+        // T4a-4 captcha block parses into the Disabled variant
+        // when "provider": "disabled".
+        assert!(matches!(cfg.captcha, CaptchaConfig::Disabled));
 
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         let reparsed: FaucetConfig = serde_json::from_str(&json).unwrap();
@@ -292,7 +302,8 @@ mod tests {
             "drip": {
                 "eth_amount_wei": 100000000000000000,
                 "usdc_amount_base_units": "10000000000"
-            }
+            },
+            "captcha": { "provider": "disabled" }
         }"#;
         let path = write_config(&dir, body);
         let err = FaucetConfig::load(&path).expect_err("numeric form must error");
@@ -319,7 +330,8 @@ mod tests {
             "drip": {
                 "eth_amount_wei": "0.1",
                 "usdc_amount_base_units": "10000"
-            }
+            },
+            "captcha": { "provider": "disabled" }
         }"#;
         let path = write_config(&dir, body);
         let err = FaucetConfig::load(&path).expect_err("must error");

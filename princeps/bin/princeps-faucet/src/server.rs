@@ -25,8 +25,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
+use crate::captcha::{self, CaptchaError, CaptchaVerifier};
 use crate::config::FaucetConfig;
 use crate::observability;
 use crate::rate_limit::{RateLimitRejection, SqliteRateLimiter};
@@ -39,6 +40,10 @@ struct AppState {
     /// time, shared across requests via cheap clones (the inner
     /// connection is `Arc<Mutex<...>>`).
     rate_limiter: SqliteRateLimiter,
+    /// Captcha verifier. Trait-object so production
+    /// (HCaptchaVerifier) and local-dev (DisabledVerifier) and
+    /// tests (MockCaptchaVerifier) all flow through one shape.
+    captcha_verifier: Arc<dyn CaptchaVerifier>,
 }
 
 /// Top-level serve loop. Binds the configured listener, installs
@@ -60,6 +65,11 @@ pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
         SqliteRateLimiter::open(&config.state_db_path, config.rate_limit)?;
     info!("rate-limit state: {}", config.state_db_path.display());
 
+    // Captcha verifier construction — the build_verifier helper
+    // emits a `warn!` if the provider is `Disabled` so the boot
+    // log makes a misconfigured production deploy visible.
+    let captcha_verifier = captcha::build_verifier(&config.captcha);
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
         .map_err(|e| {
@@ -71,6 +81,7 @@ pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
         config: Arc::new(config),
         started_at: Instant::now(),
         rate_limiter,
+        captcha_verifier,
     };
     let app = build_router(state);
 
@@ -210,12 +221,31 @@ enum FaucetError {
     /// Address validation failed; the inner string is the
     /// operator-visible reason ("must start with 0x", etc).
     BadAddress(String),
+    /// Captcha provider is enabled but the request didn't
+    /// include a token.
+    CaptchaMissing,
+    /// Captcha provider explicitly rejected the token.
+    CaptchaFailed(String),
+    /// Couldn't reach the captcha provider. 503 — this is
+    /// faucet-side infrastructure, not user error. Operators
+    /// page-able alongside oracle staleness.
+    CaptchaUnreachable(String),
     /// Rate limiter said no. Variant carries the specific
     /// dimension hit so the response is informative.
     RateLimited(RateLimitRejection),
     /// SQLite error or any other unexpected failure. The inner
     /// error is logged at `error!`; the response is generic.
     Internal(eyre::Report),
+}
+
+impl From<CaptchaError> for FaucetError {
+    fn from(e: CaptchaError) -> Self {
+        match e {
+            CaptchaError::Missing => Self::CaptchaMissing,
+            CaptchaError::Rejected { reason } => Self::CaptchaFailed(reason),
+            CaptchaError::Network { reason } => Self::CaptchaUnreachable(reason),
+        }
+    }
 }
 
 impl IntoResponse for FaucetError {
@@ -225,6 +255,30 @@ impl IntoResponse for FaucetError {
                 StatusCode::BAD_REQUEST,
                 serde_json::json!({ "error": msg, "code": "bad_address" }),
             ),
+            Self::CaptchaMissing => (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": "captcha_token required",
+                    "code": "captcha_missing",
+                }),
+            ),
+            Self::CaptchaFailed(reason) => (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": format!("captcha verification failed: {reason}"),
+                    "code": "captcha_failed",
+                }),
+            ),
+            Self::CaptchaUnreachable(reason) => {
+                tracing::error!("captcha provider unreachable: {reason}");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    serde_json::json!({
+                        "error": "captcha provider unreachable",
+                        "code": "captcha_unreachable",
+                    }),
+                )
+            }
             Self::RateLimited(r) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 serde_json::json!({ "error": r.to_string(), "code": "rate_limited" }),
@@ -286,13 +340,20 @@ async fn drip(
     headers: HeaderMap,
     Json(req): Json<DripRequest>,
 ) -> Result<Json<DripResponse>, FaucetError> {
-    if req.captcha_token.is_none() {
-        warn!("drip request without captcha_token (verification lands T4a-4)");
-    }
-
+    // Address validation first — cheap + deterministic.
     let recipient = normalize_address(&req.address).map_err(FaucetError::BadAddress)?;
 
     let ip = client_ip(&headers, connect_info.map(|ci| ci.0));
+
+    // Captcha gate next — BEFORE rate-limit recording so a
+    // rejected captcha doesn't consume the user's per-IP /
+    // per-recipient / global budget. Mirrors how the rate
+    // limiter itself doesn't record rejected attempts.
+    state
+        .captcha_verifier
+        .verify(req.captcha_token.as_deref(), Some(ip))
+        .await?;
+
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| FaucetError::Internal(eyre::eyre!("system clock before unix epoch: {e}")))?
@@ -343,7 +404,16 @@ mod tests {
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
 
+    /// Build an AppState with a passing-mock captcha. Most
+    /// tests use this; a couple of T4a-4 tests swap in
+    /// always_fail / network_error.
     fn test_state() -> AppState {
+        test_state_with_verifier(Arc::new(
+            crate::captcha::MockCaptchaVerifier::always_pass(),
+        ))
+    }
+
+    fn test_state_with_verifier(verifier: Arc<dyn CaptchaVerifier>) -> AppState {
         let rate_limit = crate::rate_limit::RateLimitConfig::testnet_defaults();
         AppState {
             config: Arc::new(FaucetConfig {
@@ -357,9 +427,11 @@ mod tests {
                     eth_amount_wei: 100_000_000_000_000_000,
                     usdc_amount_base_units: 10_000_000_000,
                 },
+                captcha: crate::captcha::CaptchaConfig::Disabled,
             }),
             started_at: Instant::now(),
             rate_limiter: SqliteRateLimiter::open_in_memory(rate_limit).unwrap(),
+            captcha_verifier: verifier,
         }
     }
 
@@ -546,16 +618,92 @@ mod tests {
         assert_eq!(json["usdc_amount_base_units"], "10000000000");
     }
 
-    /// Missing captcha_token still goes through at T4a-3 (the
-    /// field is optional in DripRequest). T4a-4 makes it required.
-    /// This test pins the T4a-3 behavior; it will need updating
-    /// when T4a-4 adds the captcha gate.
+    /// T4a-4: with the captcha provider enabled (the default
+    /// mock verifier requires a token), a drip request without
+    /// captcha_token is rejected with 400 + code captcha_missing.
+    /// Replaces the T4a-3 "missing-token-still-succeeds" test;
+    /// the gate now demands a token unless provider is Disabled.
     #[tokio::test]
-    async fn drip_without_captcha_token_still_succeeds_at_t4a3() {
+    async fn drip_without_captcha_token_returns_400_when_enabled() {
         let state = test_state();
+        let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12"}"#;
+        let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["code"], "captcha_missing");
+    }
+
+    /// T4a-4: when the provider is configured `Disabled`
+    /// (local-dev path), missing captcha_token is fine.
+    #[tokio::test]
+    async fn drip_without_captcha_token_succeeds_when_disabled() {
+        let state = test_state_with_verifier(Arc::new(crate::captcha::DisabledVerifier));
         let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12"}"#;
         let (status, _json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// T4a-4: provider rejected the token → 400 + code
+    /// captcha_failed + the provider's reason surfaced.
+    #[tokio::test]
+    async fn drip_with_failing_captcha_returns_400() {
+        let state = test_state_with_verifier(Arc::new(
+            crate::captcha::MockCaptchaVerifier::always_fail("expired-token"),
+        ));
+        let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12", "captcha_token": "x"}"#;
+        let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["code"], "captcha_failed");
+        assert!(
+            json["error"].as_str().unwrap().contains("expired-token"),
+            "error: {json}"
+        );
+    }
+
+    /// T4a-4: provider was unreachable → 503 + code
+    /// captcha_unreachable. Distinct from user-error 400 so
+    /// operator dashboards / alert rules can separate the
+    /// signals.
+    #[tokio::test]
+    async fn drip_with_captcha_network_error_returns_503() {
+        let state = test_state_with_verifier(Arc::new(
+            crate::captcha::MockCaptchaVerifier::network_error("dns failed"),
+        ));
+        let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12", "captcha_token": "x"}"#;
+        let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["code"], "captcha_unreachable");
+    }
+
+    /// T4a-4: failing captcha must NOT consume the user's
+    /// rate-limit budget — the captcha gate runs before the
+    /// rate-limit recording, so a rejected request leaves the
+    /// drip table untouched. Confirmed by a follow-up drip
+    /// from the same IP+recipient that succeeds.
+    #[tokio::test]
+    async fn drip_failing_captcha_does_not_consume_rate_limit_budget() {
+        // First request: failing-captcha state.
+        let failing_state = test_state_with_verifier(Arc::new(
+            crate::captcha::MockCaptchaVerifier::always_fail("bad-token"),
+        ));
+        // Capture the rate-limiter so we can hand it to the
+        // second state — both states must share the same
+        // SQLite-backed budget for this test to be meaningful.
+        let rate_limiter = failing_state.rate_limiter.clone();
+
+        let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12", "captcha_token": "x"}"#;
+        let (s1, _) = post_drip(failing_state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(s1, StatusCode::BAD_REQUEST);
+
+        // Second request: passing-captcha state, BUT sharing
+        // the rate-limit budget.
+        let mut passing_state = test_state();
+        passing_state.rate_limiter = rate_limiter;
+        let (s2, _) = post_drip(passing_state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(
+            s2,
+            StatusCode::OK,
+            "rejected-captcha request must not consume rate-limit budget"
+        );
     }
 
     /// Bad address (wrong length) returns 400 with the

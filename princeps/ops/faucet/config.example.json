@@ -35,8 +35,20 @@
     "                   an all-zero tx_hash; T4a-5 replaces the stub",
     "                   with a real alloy broadcast.",
     "",
+    "T4a-4 fields:",
+    "  captcha        — externally-tagged enum. `{ provider:",
+    "                   \"disabled\" }` skips verification (local-",
+    "                   dev ONLY — production MUST switch to",
+    "                   hcaptcha). `{ provider: \"hcaptcha\",",
+    "                   secret: \"...\" [, site_key: \"...\"] }`",
+    "                   calls https://api.hcaptcha.com/siteverify.",
+    "                   `secret` is sensitive; chmod the config",
+    "                   0o640. `site_key` is read by the browser",
+    "                   widget, NOT by the faucet — documented",
+    "                   here so the deployment runbook has it in",
+    "                   one place.",
+    "",
     "Fields landing in later slices:",
-    "  T4a-4 — captcha { provider, site_key, secret_key }.",
     "  T4a-5 — chain { rpc_url, faucet_keystore_path } and the",
     "          paired --faucet-keystore-passphrase-* flags."
   ],
@@ -55,5 +67,8 @@
   "drip": {
     "eth_amount_wei": "100000000000000000",
     "usdc_amount_base_units": "10000000000"
+  },
+  "captcha": {
+    "provider": "disabled"
   }
 }

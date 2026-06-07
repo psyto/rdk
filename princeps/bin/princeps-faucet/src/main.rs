@@ -19,6 +19,7 @@
 //! - [`server::serve`] is the single entry point for future
 //!   middleware (rate limiting, request logging, etc.).
 
+mod captcha;
 mod config;
 mod observability;
 mod rate_limit;
