@@ -15,18 +15,21 @@
 //!   chain submission in T4a-5.
 //! - Captcha verification middleware in T4a-4.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
-use axum::routing::get;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
-use tracing::info;
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use crate::config::FaucetConfig;
 use crate::observability;
-use crate::rate_limit::SqliteRateLimiter;
+use crate::rate_limit::{RateLimitRejection, SqliteRateLimiter};
 
 #[derive(Clone)]
 struct AppState {
@@ -34,9 +37,7 @@ struct AppState {
     started_at: Instant,
     /// SQLite-backed rate limiter. Constructed once at `serve`
     /// time, shared across requests via cheap clones (the inner
-    /// connection is `Arc<Mutex<...>>`). T4a-3 wires this into
-    /// `POST /drip`.
-    #[allow(dead_code)] // first caller lands in T4a-3
+    /// connection is `Arc<Mutex<...>>`).
     rate_limiter: SqliteRateLimiter,
 }
 
@@ -73,9 +74,16 @@ pub(crate) async fn serve(config: FaucetConfig) -> eyre::Result<()> {
     };
     let app = build_router(state);
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| eyre::eyre!("axum serve loop ended: {e}"))?;
+    // `into_make_service_with_connect_info` is what plumbs the
+    // peer SocketAddr into the request extensions so the drip
+    // handler can extract it via `ConnectInfo`. Without this,
+    // the ConnectInfo extractor returns 500.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| eyre::eyre!("axum serve loop ended: {e}"))?;
     Ok(())
 }
 
@@ -86,6 +94,7 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/status", get(status))
+        .route("/drip", post(drip))
         .with_state(state)
 }
 
@@ -139,6 +148,175 @@ struct RateLimitSummary {
 /// fields here are deliberately non-sensitive — no wallet
 /// balance, no rate-limit table state, nothing that would leak
 /// faucet-drain progress.
+// === POST /drip (T4a-3) =====================================================
+//
+// Happy path for the drip request. Stubs the chain submission —
+// the response `tx_hash` is all-zero until T4a-5 wires real
+// alloy-based broadcast. What this slice DOES do:
+//
+//   - Parse the request body. `address` is required; `captcha_token`
+//     is accepted but NOT verified (verification lands in T4a-4).
+//   - Validate + normalize the recipient address (0x-prefixed,
+//     40 hex chars, lowercased).
+//   - Extract the client IP — `X-Forwarded-For` first (production
+//     deploys behind a reverse proxy that sets it), peer
+//     `SocketAddr` from `ConnectInfo` as fallback.
+//   - Atomic rate-limit check via `SqliteRateLimiter::check_and_record`.
+//   - 200 with stubbed tx_hash on success, 429 on rate-limit,
+//     400 on bad input.
+//
+// Security note on X-Forwarded-For: this slice trusts the header
+// unconditionally. The deployment runbook (T4c) MUST require that
+// operators terminate inbound at a reverse proxy that STRIPS any
+// inbound X-F-F and inserts its own. Without that, an attacker
+// can forge the header and dodge per-IP limits — at v0 testnet
+// the per-recipient + global limits still provide bounded drain.
+
+#[derive(Debug, Deserialize)]
+struct DripRequest {
+    /// Recipient address. `0x` prefix required, 40 hex chars,
+    /// case-insensitive on input — normalized lowercase before
+    /// hitting the rate limiter so `0xABC...` and `0xabc...`
+    /// share a budget.
+    address: String,
+    /// Captcha token. T4a-4 will verify this against the
+    /// configured provider; T4a-3 only checks for presence —
+    /// missing token still gets through but produces a tracing
+    /// warning so operators can see captcha-less traffic in
+    /// the logs while T4a-4 is in flight.
+    #[serde(default)]
+    captcha_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DripResponse {
+    /// Stubbed at T4a-3 — always all-zero. T4a-5 returns the
+    /// real broadcast tx hash here. The response shape doesn't
+    /// change between T4a-3 and T4a-5; only the value does.
+    tx_hash: String,
+    /// Normalized lowercase recipient address.
+    recipient: String,
+    #[serde(with = "crate::config::u128_str")]
+    eth_amount_wei: u128,
+    #[serde(with = "crate::config::u128_str")]
+    usdc_amount_base_units: u128,
+}
+
+/// Handler-side error type. `IntoResponse` maps each variant to
+/// a status + JSON body so the call sites can just `?` their
+/// way through the normal flow.
+#[derive(Debug)]
+enum FaucetError {
+    /// Address validation failed; the inner string is the
+    /// operator-visible reason ("must start with 0x", etc).
+    BadAddress(String),
+    /// Rate limiter said no. Variant carries the specific
+    /// dimension hit so the response is informative.
+    RateLimited(RateLimitRejection),
+    /// SQLite error or any other unexpected failure. The inner
+    /// error is logged at `error!`; the response is generic.
+    Internal(eyre::Report),
+}
+
+impl IntoResponse for FaucetError {
+    fn into_response(self) -> Response {
+        let (status, body) = match self {
+            Self::BadAddress(msg) => (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": msg, "code": "bad_address" }),
+            ),
+            Self::RateLimited(r) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({ "error": r.to_string(), "code": "rate_limited" }),
+            ),
+            Self::Internal(e) => {
+                tracing::error!("faucet internal error: {e:?}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": "internal error", "code": "internal" }),
+                )
+            }
+        };
+        (status, Json(body)).into_response()
+    }
+}
+
+/// Validate a user-supplied address. Returns the normalized
+/// lowercase form (`0x` + 40 lowercase hex chars) on success.
+/// Pure function — easy to unit-test without HTTP plumbing.
+fn normalize_address(raw: &str) -> Result<String, String> {
+    let stripped = raw
+        .strip_prefix("0x")
+        .ok_or_else(|| "address must start with 0x".to_string())?;
+    if stripped.len() != 40 {
+        return Err(format!(
+            "address must be 40 hex chars after 0x, got {}",
+            stripped.len()
+        ));
+    }
+    if !stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("address must be hexadecimal after 0x".to_string());
+    }
+    Ok(format!("0x{}", stripped.to_lowercase()))
+}
+
+/// Extract the client IP from request headers, preferring
+/// `X-Forwarded-For` (production deploys behind a reverse
+/// proxy) and falling back to the peer `SocketAddr` from
+/// `ConnectInfo`. Last-resort fallback is `0.0.0.0` so per-IP
+/// rate-limit still has SOME bucket key even if neither source
+/// resolves — the global cap is the load-bearing protection
+/// in that misconfigured case.
+fn client_ip(headers: &HeaderMap, connect_info: Option<SocketAddr>) -> IpAddr {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        .or_else(|| connect_info.map(|sa| sa.ip()))
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
+
+/// `POST /drip` — the request-flow entry point. T4a-3 stubs the
+/// downstream tx broadcast; T4a-5 replaces the stub with a real
+/// alloy-based send.
+async fn drip(
+    State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(req): Json<DripRequest>,
+) -> Result<Json<DripResponse>, FaucetError> {
+    if req.captcha_token.is_none() {
+        warn!("drip request without captcha_token (verification lands T4a-4)");
+    }
+
+    let recipient = normalize_address(&req.address).map_err(FaucetError::BadAddress)?;
+
+    let ip = client_ip(&headers, connect_info.map(|ci| ci.0));
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| FaucetError::Internal(eyre::eyre!("system clock before unix epoch: {e}")))?
+        .as_secs();
+    let now_i64 = i64::try_from(now_secs)
+        .map_err(|e| FaucetError::Internal(eyre::eyre!("system clock overflows i64: {e}")))?;
+
+    let outcome = state
+        .rate_limiter
+        .check_and_record(&ip.to_string(), &recipient, now_i64)
+        .map_err(FaucetError::Internal)?;
+    if let Err(rejection) = outcome {
+        return Err(FaucetError::RateLimited(rejection));
+    }
+
+    Ok(Json(DripResponse {
+        // T4a-3 stub. T4a-5 swaps this for the real broadcast hash.
+        tx_hash: format!("0x{}", "0".repeat(64)),
+        recipient,
+        eth_amount_wei: state.config.drip.eth_amount_wei,
+        usdc_amount_base_units: state.config.drip.usdc_amount_base_units,
+    }))
+}
+
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let rl = state.config.rate_limit;
     Json(StatusResponse {
@@ -175,6 +353,10 @@ mod tests {
                 chain_id: 424242,
                 rate_limit,
                 state_db_path: std::path::PathBuf::from(":memory:"),
+                drip: crate::config::DripAmounts {
+                    eth_amount_wei: 100_000_000_000_000_000,
+                    usdc_amount_base_units: 10_000_000_000,
+                },
             }),
             started_at: Instant::now(),
             rate_limiter: SqliteRateLimiter::open_in_memory(rate_limit).unwrap(),
@@ -249,5 +431,211 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // === T4a-3: client_ip + normalize_address unit tests ====================
+
+    #[test]
+    fn client_ip_prefers_xff_first_entry() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "203.0.113.7, 10.0.0.1, 10.0.0.2".parse().unwrap(),
+        );
+        let ip = client_ip(&headers, Some("127.0.0.1:1".parse().unwrap()));
+        assert_eq!(ip, "203.0.113.7".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_connect_info_when_no_xff() {
+        let headers = HeaderMap::new();
+        let connect = Some("198.51.100.5:55000".parse().unwrap());
+        let ip = client_ip(&headers, connect);
+        assert_eq!(ip, "198.51.100.5".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn client_ip_unspecified_when_no_signal() {
+        let headers = HeaderMap::new();
+        let ip = client_ip(&headers, None);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn client_ip_malformed_xff_falls_back_to_connect_info() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        let ip = client_ip(&headers, Some("198.51.100.5:1".parse().unwrap()));
+        assert_eq!(ip, "198.51.100.5".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn normalize_address_canonicalizes_mixed_case() {
+        let out = normalize_address("0xAbCdEf1234567890aBcDeF1234567890ABCDEF12").unwrap();
+        assert_eq!(out, "0xabcdef1234567890abcdef1234567890abcdef12");
+    }
+
+    #[test]
+    fn normalize_address_rejects_missing_prefix() {
+        let err = normalize_address("AbCdEf1234567890aBcDeF1234567890ABCDEF12").unwrap_err();
+        assert!(err.contains("0x"), "err: {err}");
+    }
+
+    #[test]
+    fn normalize_address_rejects_wrong_length() {
+        let err = normalize_address("0xabc").unwrap_err();
+        assert!(err.contains("40 hex chars"), "err: {err}");
+    }
+
+    #[test]
+    fn normalize_address_rejects_non_hex() {
+        let err = normalize_address("0xabcdef1234567890abcdef1234567890abcdef1Z").unwrap_err();
+        assert!(err.contains("hexadecimal"), "err: {err}");
+    }
+
+    // === T4a-3: POST /drip via oneshot =====================================
+
+    /// Helper: send a POST /drip with the given body + headers,
+    /// return the status code and parsed JSON.
+    async fn post_drip(
+        state: AppState,
+        body: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> (StatusCode, serde_json::Value) {
+        let app = build_router(state);
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/drip")
+            .header("content-type", "application/json");
+        for (k, v) in extra_headers {
+            req = req.header(*k, *v);
+        }
+        let resp = app
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("response must be JSON");
+        (status, json)
+    }
+
+    /// Happy path: valid request → 200 with stubbed tx_hash,
+    /// recipient normalized to lowercase, drip amounts echoed
+    /// from config.
+    #[tokio::test]
+    async fn drip_happy_path_returns_200_with_stub_hash() {
+        let state = test_state();
+        let body = r#"{
+            "address": "0xABCDEF1234567890abcdef1234567890ABCDEF12",
+            "captcha_token": "anything"
+        }"#;
+        let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        assert_eq!(
+            json["tx_hash"],
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "T4a-3 stubs the tx hash; T4a-5 returns real broadcast hash"
+        );
+        assert_eq!(
+            json["recipient"], "0xabcdef1234567890abcdef1234567890abcdef12",
+            "recipient must be lowercased"
+        );
+        assert_eq!(json["eth_amount_wei"], "100000000000000000");
+        assert_eq!(json["usdc_amount_base_units"], "10000000000");
+    }
+
+    /// Missing captcha_token still goes through at T4a-3 (the
+    /// field is optional in DripRequest). T4a-4 makes it required.
+    /// This test pins the T4a-3 behavior; it will need updating
+    /// when T4a-4 adds the captcha gate.
+    #[tokio::test]
+    async fn drip_without_captcha_token_still_succeeds_at_t4a3() {
+        let state = test_state();
+        let body = r#"{"address": "0xabcdef1234567890abcdef1234567890abcdef12"}"#;
+        let (status, _json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Bad address (wrong length) returns 400 with the
+    /// validation error in the body.
+    #[tokio::test]
+    async fn drip_bad_address_returns_400() {
+        let state = test_state();
+        let body = r#"{"address": "0xshort", "captcha_token": "x"}"#;
+        let (status, json) = post_drip(state, body, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["code"], "bad_address");
+        assert!(
+            json["error"].as_str().unwrap().contains("40 hex chars"),
+            "error: {json}"
+        );
+    }
+
+    /// Missing `address` field is a JSON-deserialize failure
+    /// inside axum's `Json` extractor — returns 422
+    /// (Unprocessable Entity) with a plain-text body. The
+    /// status code is what callers branch on; the body shape
+    /// is axum's, not ours, so we don't pin it here.
+    #[tokio::test]
+    async fn drip_missing_address_returns_4xx() {
+        let app = build_router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/drip")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::from(r#"{"captcha_token": "x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx, got {}",
+            resp.status()
+        );
+    }
+
+    /// Second drip from the same IP inside the per-IP window
+    /// is rejected with 429 + rate_limited code. End-to-end
+    /// verification that the rate limiter is wired into the
+    /// handler, not just sitting in AppState.
+    #[tokio::test]
+    async fn drip_rate_limited_returns_429() {
+        let state = test_state();
+        let body1 = r#"{"address": "0x1111111111111111111111111111111111111111", "captcha_token": "x"}"#;
+        let body2 = r#"{"address": "0x2222222222222222222222222222222222222222", "captcha_token": "x"}"#;
+        let xff = [("x-forwarded-for", "1.2.3.4")];
+
+        let (s1, _) = post_drip(state.clone(), body1, &xff).await;
+        assert_eq!(s1, StatusCode::OK);
+        // Same IP, fresh recipient → per-IP limit hits.
+        let (s2, j2) = post_drip(state, body2, &xff).await;
+        assert_eq!(s2, StatusCode::TOO_MANY_REQUESTS, "body: {j2}");
+        assert_eq!(j2["code"], "rate_limited");
+        assert!(
+            j2["error"].as_str().unwrap().contains("per-IP"),
+            "error: {j2}"
+        );
+    }
+
+    /// X-Forwarded-For is the rate-limit key — two requests
+    /// with different X-F-F headers from the same connection
+    /// must each get their own per-IP bucket. Confirms the
+    /// reverse-proxy assumption documented at the handler.
+    #[tokio::test]
+    async fn drip_xff_partitions_per_ip_buckets() {
+        let state = test_state();
+        let body1 = r#"{"address": "0x1111111111111111111111111111111111111111", "captcha_token": "x"}"#;
+        let body2 = r#"{"address": "0x2222222222222222222222222222222222222222", "captcha_token": "x"}"#;
+
+        let (s1, _) = post_drip(state.clone(), body1, &[("x-forwarded-for", "1.2.3.4")]).await;
+        assert_eq!(s1, StatusCode::OK);
+        let (s2, _) = post_drip(state, body2, &[("x-forwarded-for", "5.6.7.8")]).await;
+        assert_eq!(s2, StatusCode::OK, "different X-F-F should partition buckets");
     }
 }

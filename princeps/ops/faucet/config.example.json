@@ -26,8 +26,16 @@
     "                   state survives faucet restart. Parent dir",
     "                   is auto-created on first boot.",
     "",
+    "T4a-3 fields:",
+    "  drip           — per-drip payout in u128 base units, JSON-",
+    "                   encoded as STRINGS (eth-wei overflows the",
+    "                   JSON-number 2^53 precision range). Defaults:",
+    "                   0.1 ETH + 10000 USDC. T4a-3 stubs the chain",
+    "                   submission so a drip request returns 200 +",
+    "                   an all-zero tx_hash; T4a-5 replaces the stub",
+    "                   with a real alloy broadcast.",
+    "",
     "Fields landing in later slices:",
-    "  T4a-3 — drip { eth_amount_wei, usdc_amount_base_units }.",
     "  T4a-4 — captcha { provider, site_key, secret_key }.",
     "  T4a-5 — chain { rpc_url, faucet_keystore_path } and the",
     "          paired --faucet-keystore-passphrase-* flags."
@@ -43,5 +51,9 @@
     "global_window_secs": 3600,
     "global_max_drips": 100
   },
-  "state_db_path": "/var/lib/princeps-faucet/state.db"
+  "state_db_path": "/var/lib/princeps-faucet/state.db",
+  "drip": {
+    "eth_amount_wei": "100000000000000000",
+    "usdc_amount_base_units": "10000000000"
+  }
 }

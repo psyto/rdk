@@ -63,6 +63,49 @@ pub(crate) struct FaucetConfig {
     /// put this on durable storage so rate-limit state survives
     /// faucet restarts.
     pub state_db_path: PathBuf,
+
+    /// How much each successful drip dispenses (T4a-3).
+    pub drip: DripAmounts,
+}
+
+/// Per-drip amounts. Wei + USDC base units are u128 to cover
+/// the eth-wei range that overflows i64/u64; serialized as
+/// strings on the wire because JSON numbers lose precision
+/// beyond 2^53.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct DripAmounts {
+    /// ETH per drip, in wei. Default in the example config is
+    /// `100_000_000_000_000_000` = 0.1 ETH — covers a few
+    /// hundred standard txs at typical gas prices.
+    #[serde(with = "u128_str")]
+    pub eth_amount_wei: u128,
+
+    /// USDC per drip, in the token's smallest unit. ERC-20 USDC
+    /// uses 6 decimals; the example config dispenses
+    /// `10_000_000_000` = 10_000 USDC, enough for the v0
+    /// lending demo's deposit/borrow flow.
+    #[serde(with = "u128_str")]
+    pub usdc_amount_base_units: u128,
+}
+
+/// serde helper for `u128` fields that ride as JSON strings.
+/// Used by [`DripAmounts`]. Standard "u128 doesn't fit in JSON
+/// number" workaround — strings round-trip across the wire
+/// without precision loss.
+pub(crate) mod u128_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse()
+            .map_err(|e: std::num::ParseIntError| serde::de::Error::custom(format!(
+                "u128 string parse failed: {e}"
+            )))
+    }
 }
 
 impl FaucetConfig {
@@ -89,9 +132,9 @@ mod tests {
         path
     }
 
-    /// Common rate-limit + state path block, factored so each
-    /// test body stays readable.
-    const RATE_LIMIT_BLOCK: &str = r#"
+    /// Common rate-limit + state path + drip block, factored so
+    /// each test body stays readable.
+    const TAIL_BLOCK: &str = r#"
         "rate_limit": {
             "per_ip_window_secs": 86400,
             "per_ip_max_drips": 1,
@@ -100,7 +143,11 @@ mod tests {
             "global_window_secs": 3600,
             "global_max_drips": 100
         },
-        "state_db_path": "/var/lib/princeps-faucet/state.db"
+        "state_db_path": "/var/lib/princeps-faucet/state.db",
+        "drip": {
+            "eth_amount_wei": "100000000000000000",
+            "usdc_amount_base_units": "10000000000"
+        }
     "#;
 
     /// Round-trip: full-shape config parses, re-serializes,
@@ -115,7 +162,7 @@ mod tests {
                 "listen_addr": "127.0.0.1:8080",
                 "metrics_bind": "127.0.0.1:9091",
                 "chain_id": 424242,
-                {RATE_LIMIT_BLOCK}
+                {TAIL_BLOCK}
             }}"#
         );
         let path = write_config(&dir, &body);
@@ -130,6 +177,9 @@ mod tests {
             cfg.state_db_path,
             std::path::PathBuf::from("/var/lib/princeps-faucet/state.db"),
         );
+        // T4a-3 drip amounts round-trip as u128 from JSON strings.
+        assert_eq!(cfg.drip.eth_amount_wei, 100_000_000_000_000_000);
+        assert_eq!(cfg.drip.usdc_amount_base_units, 10_000_000_000);
 
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         let reparsed: FaucetConfig = serde_json::from_str(&json).unwrap();
@@ -153,7 +203,7 @@ mod tests {
             r#"{{
                 "listen_addr": "0.0.0.0:8080",
                 "chain_id": 424242,
-                {RATE_LIMIT_BLOCK}
+                {TAIL_BLOCK}
             }}"#
         );
         let path = write_config(&dir, &body);
@@ -171,7 +221,7 @@ mod tests {
         let body = format!(
             r#"{{
                 "listen_addr": "127.0.0.1:8080",
-                {RATE_LIMIT_BLOCK}
+                {TAIL_BLOCK}
             }}"#
         );
         let path = write_config(&dir, &body);
@@ -217,5 +267,64 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("malformed faucet config"));
         assert!(msg.contains(&path.display().to_string()));
+    }
+
+    /// u128 drip amounts must be JSON strings — large eth-wei
+    /// values overflow the JSON-number precision range (2^53).
+    /// Numeric form should fail parse so the next operator
+    /// who tries to hand-edit a config catches the type
+    /// requirement at boot, not in production traffic.
+    #[test]
+    fn drip_amounts_require_string_encoding() {
+        let dir = TempDir::new().unwrap();
+        let body = r#"{
+            "listen_addr": "127.0.0.1:8080",
+            "chain_id": 424242,
+            "rate_limit": {
+                "per_ip_window_secs": 86400,
+                "per_ip_max_drips": 1,
+                "per_recipient_window_secs": 86400,
+                "per_recipient_max_drips": 1,
+                "global_window_secs": 3600,
+                "global_max_drips": 100
+            },
+            "state_db_path": "/tmp/state.db",
+            "drip": {
+                "eth_amount_wei": 100000000000000000,
+                "usdc_amount_base_units": "10000000000"
+            }
+        }"#;
+        let path = write_config(&dir, body);
+        let err = FaucetConfig::load(&path).expect_err("numeric form must error");
+        assert!(err.to_string().contains("malformed faucet config"));
+    }
+
+    /// Non-numeric u128 string fails parse with a useful
+    /// error — the operator typed a non-integer.
+    #[test]
+    fn drip_amount_non_integer_string_errors() {
+        let dir = TempDir::new().unwrap();
+        let body = r#"{
+            "listen_addr": "127.0.0.1:8080",
+            "chain_id": 424242,
+            "rate_limit": {
+                "per_ip_window_secs": 86400,
+                "per_ip_max_drips": 1,
+                "per_recipient_window_secs": 86400,
+                "per_recipient_max_drips": 1,
+                "global_window_secs": 3600,
+                "global_max_drips": 100
+            },
+            "state_db_path": "/tmp/state.db",
+            "drip": {
+                "eth_amount_wei": "0.1",
+                "usdc_amount_base_units": "10000"
+            }
+        }"#;
+        let path = write_config(&dir, body);
+        let err = FaucetConfig::load(&path).expect_err("must error");
+        let msg = err.to_string();
+        assert!(msg.contains("malformed faucet config"));
+        assert!(msg.contains("u128 string parse failed"), "msg: {msg}");
     }
 }
