@@ -130,9 +130,10 @@ impl ScryptParams {
 
     /// Cheapest legal scrypt cost so the test suite stays
     /// sub-second. Same KDF, vastly weaker — must NEVER be used
-    /// for keys that protect anything real.
+    /// for keys that protect anything real. `pub(crate)` so the
+    /// resolver tests in `validator_keygen` can also reach it.
     #[cfg(test)]
-    fn for_tests() -> Self {
+    pub(crate) fn for_tests() -> Self {
         Self {
             n: 16,
             r: 8,

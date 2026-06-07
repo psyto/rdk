@@ -339,6 +339,32 @@ enum Command {
         /// Example: `--reth-metrics-bind=127.0.0.1:9100`.
         #[arg(long)]
         reth_metrics_bind: Option<std::net::SocketAddr>,
+
+        /// Stage T3a-3 — explicit path to a scrypt + AES-256-GCM
+        /// encrypted validator keystore (the T3a-2 output format).
+        /// When supplied, the resolver requires this exact file to
+        /// exist; it bails rather than silently fall through to
+        /// plaintext or generate-fresh.
+        ///
+        /// When omitted, the resolver looks for
+        /// `<data-dir>/validator-keystore.json` and uses it if
+        /// present. If neither path resolves, the resolver falls
+        /// back to the legacy plaintext gen-or-load path.
+        #[arg(long)]
+        validator_keystore: Option<PathBuf>,
+
+        /// Stage T3a-3 — read the keystore passphrase from this
+        /// file (single line, trailing newline stripped). The
+        /// production path for systemd unit files using
+        /// `LoadCredential=`.
+        #[arg(long)]
+        validator_keystore_passphrase_file: Option<PathBuf>,
+
+        /// Stage T3a-3 — read the keystore passphrase from stdin
+        /// (one line, trailing newline stripped). For CI /
+        /// scripted boots.
+        #[arg(long, default_value_t = false)]
+        validator_keystore_passphrase_stdin: bool,
     },
 }
 
@@ -586,6 +612,9 @@ fn main() -> eyre::Result<()> {
             reth_chain_history_file,
             reth_genesis_file,
             reth_metrics_bind,
+            validator_keystore,
+            validator_keystore_passphrase_file,
+            validator_keystore_passphrase_stdin,
         } => tokio_rt()?.block_on(run_reth_devnet(
             rounds,
             moniker,
@@ -599,6 +628,9 @@ fn main() -> eyre::Result<()> {
             reth_chain_history_file,
             reth_genesis_file,
             reth_metrics_bind,
+            validator_keystore,
+            validator_keystore_passphrase_file,
+            validator_keystore_passphrase_stdin,
         )),
     }
 }
@@ -1363,6 +1395,9 @@ async fn run_reth_devnet(
     chain_history_file: Option<PathBuf>,
     genesis_file: Option<PathBuf>,
     metrics_bind: Option<std::net::SocketAddr>,
+    validator_keystore: Option<PathBuf>,
+    validator_keystore_passphrase_file: Option<PathBuf>,
+    validator_keystore_passphrase_stdin: bool,
 ) -> eyre::Result<()> {
     // T2b — bring up the Prometheus scrape endpoint BEFORE the first
     // tick fires. Skipped (silently) when the flag is unset; emissions
@@ -1586,10 +1621,38 @@ async fn run_reth_devnet(
     //    reuse. Stage T3a-1 lifted the inline logic into
     //    `validator_keygen` so the same code path is shared with
     //    the air-gapped `princeps validator gen-keys` subcommand.
-    let key_path = data_dir_path.join(validator_keygen::VALIDATOR_KEY_FILENAME);
-    let (private, key_status) = validator_keygen::gen_or_load(&key_path)?;
+    //    Stage T3a-3 expands the resolver to also prefer an
+    //    encrypted keystore (T3a-2 format) when present, with the
+    //    passphrase sourced from --validator-keystore-passphrase-*
+    //    flags or a TTY prompt.
+    let passphrase_source = match (
+        validator_keystore_passphrase_file.as_ref(),
+        validator_keystore_passphrase_stdin,
+    ) {
+        (Some(path), false) => validator_keygen::PassphraseSource::File(path.clone()),
+        (None, true) => validator_keygen::PassphraseSource::Stdin,
+        (None, false) => validator_keygen::PassphraseSource::Tty,
+        (Some(_), true) => eyre::bail!(
+            "--validator-keystore-passphrase-file and \
+             --validator-keystore-passphrase-stdin are mutually exclusive"
+        ),
+    };
+    let identity = validator_keygen::load_or_generate_validator_identity(
+        &validator_keygen::LoadOrGenerateOpts {
+            data_dir: &data_dir_path,
+            keystore_path_override: validator_keystore.as_deref(),
+            passphrase: passphrase_source,
+        },
+    )?;
+    for warning in &identity.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let private = identity.private;
     let public = private.public_key();
-    println!("[3/6] {key_status} validator key from {}", key_path.display());
+    println!("[3/6] validator key: {} ({})",
+        identity.status,
+        data_dir_path.display(),
+    );
 
     // Sidecar with the pubkey hex so scripts / operators can read
     // the pubkey without parsing logs or reimplementing Ed25519
