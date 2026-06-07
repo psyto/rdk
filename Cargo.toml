@@ -21,6 +21,7 @@ members = [
     "princeps/bin/princeps",
     "princeps/bin/liquidator-bot",
     "princeps/bin/lending-rpc-server",
+    "princeps/bin/princeps-faucet",
 ]
 
 [workspace.package]

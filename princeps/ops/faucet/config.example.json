@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Reference faucet config for the v0 public testnet. Copy this",
+    "to your deployment-specific path (e.g. /etc/princeps-faucet/config.json),",
+    "chmod 0640, and pass via `princeps-faucet serve --config <path>`.",
+    "",
+    "T4a-1 fields:",
+    "  listen_addr  — HTTP API bind. Put TLS termination upstream.",
+    "  metrics_bind — optional Prometheus scrape endpoint. TD-006",
+    "                 requires this to be a different port from",
+    "                 listen_addr so internal scraping never shares",
+    "                 a surface with public traffic.",
+    "  chain_id     — the chain this faucet drips against. Must",
+    "                 match testnet-genesis.json.",
+    "",
+    "Fields landing in later slices:",
+    "  T4a-2 — rate_limit { per_ip_window_secs, per_recipient_window_secs,",
+    "                       global_window_secs, *_max_drips } and",
+    "          state_db_path (SQLite).",
+    "  T4a-3 — drip { eth_amount_wei, usdc_amount_base_units }.",
+    "  T4a-4 — captcha { provider, site_key, secret_key }.",
+    "  T4a-5 — chain { rpc_url, faucet_keystore_path } and the",
+    "          paired --faucet-keystore-passphrase-* flags."
+  ],
+  "listen_addr": "127.0.0.1:8080",
+  "metrics_bind": "127.0.0.1:9091",
+  "chain_id": 424242
+}
