@@ -396,13 +396,18 @@ enum ScenarioAction {
         #[arg(long, default_value = "scenarios")]
         dir: PathBuf,
     },
-    /// Print the scenario's step-by-step recipe of CLI invocations.
-    /// (Embedded in-process execution lands in v1.)
+    /// Run the scenario: walk each step, spawning princeps as a
+    /// sub-process so each step's own output streams live. Pass
+    /// `--dry-run` to fall back to v0 behavior (print the step list
+    /// without executing).
     Run {
         /// Scenario name (file stem without `.json`).
         name: String,
         #[arg(long, default_value = "scenarios")]
         dir: PathBuf,
+        /// Skip embedded execution; print only the step list.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -698,11 +703,23 @@ fn run_scenario(action: ScenarioAction) -> eyre::Result<()> {
             print!("{}", scenario::render_show(&s, &path));
             Ok(())
         }
-        ScenarioAction::Run { name, dir } => {
+        ScenarioAction::Run { name, dir, dry_run } => {
             let path = dir.join(format!("{name}.json"));
             let s = scenario::load_from_path(&path)?;
-            print!("{}", scenario::render_run_v0(&s, &path));
-            Ok(())
+            if dry_run {
+                print!("{}", scenario::render_run_v0(&s, &path));
+                Ok(())
+            } else {
+                let report = scenario::run_embedded(&s, &path)?;
+                if report.failed > 0 {
+                    Err(eyre::eyre!(
+                        "{} step(s) failed during scenario run",
+                        report.failed
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }

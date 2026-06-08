@@ -37,10 +37,13 @@ princeps scenario list
 # Inspect one scenario without running it.
 princeps scenario show cross-margin-survival
 
-# Get the step-by-step recipe of CLI invocations.
-# (v0 prints the steps; v1 will execute each step in-process and
-# render a headline + before/after delta. See bin/princeps/src/scenario.rs.)
+# Run the scenario: each step is spawned as a sub-process with
+# stdio inherited so output streams live. Wrapped with a headline
+# header, per-step separators, and a final verdict + CTA.
 princeps scenario run cross-margin-survival
+
+# Pass --dry-run to print the step list without executing.
+princeps scenario run cross-margin-survival --dry-run
 ```
 
 Three scenarios ship today: `cross-margin-survival` (the canonical prime broker thesis at the canonical crash depth), `cross-margin-fail` (negative control at deeper crash), `manual-lending-walkthrough` (hands-on lending CLI walkthrough).
@@ -80,10 +83,10 @@ Per `fabrknt/website/SANDBOX-PATTERN.md`, every Fabrknt sandbox must ship five e
 
 | Element | Status | Notes |
 |---|---|---|
-| (1) Pre-baked scenarios | **partial → present** | `scenarios/` directory with 3 scenarios (`cross-margin-survival`, `cross-margin-fail`, `manual-lending-walkthrough`). More to follow as oracle-stale and ADL-cascade behaviors get scripted. |
-| (2) Business-readable output | partial | `scenario list` / `show` / `run` produce ASCII tables and step summaries with headlines. `lending-demo`'s own output is still raw mechanics. v1 will wrap the runtime output in a headline + delta layer. |
-| (3) Parameter dial | partial | `lending-demo --eth-crash-price <N>` already exposes the canonical dial. Per-step parameter overrides on `scenario run` (margin bps, oracle staleness) land in v1. |
-| (4) Scenario replay | partial | Each scenario file is a deterministic step list — re-running yields the same result. Format does not yet capture mid-stream RPC observations; that lands when in-process execution is added in v1. |
+| (1) Pre-baked scenarios | **present** | `scenarios/` directory with 3 scenarios (`cross-margin-survival`, `cross-margin-fail`, `manual-lending-walkthrough`). More to follow as oracle-stale and ADL-cascade behaviors get scripted. |
+| (2) Business-readable output | **v1 present** | `scenario run` spawns each step as a princeps sub-process (via `current_exe`) with stdio inherited, so step output (e.g., `lending-demo`'s siloed-vs-unified table) streams live. Wrapped with a headline header, per-step separators, and a final verdict line. v2 will tee stdio so declared expect-substrings can be verified. |
+| (3) Parameter dial | partial | `lending-demo --eth-crash-price <N>` already exposes the canonical dial. Per-step parameter overrides on `scenario run` (margin bps, oracle staleness) land in v2. |
+| (4) Scenario replay | **present** | Each scenario file is a deterministic step list — re-running yields the same sub-process invocations. State persistence across steps is the responsibility of the underlying CLI (`lending` writes to `~/.princeps/lending-state.json`). |
 | (5) CTA | **done** | `scenario list` / `show` / `run` all render a three-option CTA footer (adopt engine / custom build / hosted access). |
 
 ## Operator surface
