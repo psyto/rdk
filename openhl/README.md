@@ -77,7 +77,7 @@ Per `fabrknt/website/SANDBOX-PATTERN.md`, every Fabrknt sandbox must ship five e
 | Element | Status | Notes |
 |---|---|---|
 | (1) Pre-baked scenarios | **present** | `scenarios/` directory with 3 named scenarios (`cascade`, `single-block-cascade`, `calm-baseline`). 2 more pending (oracle stale, ADL trigger) once the JSON format extends to oracle observations. |
-| (2) Business-readable output | **v1 present** | `scenario run` executes in-process and renders headline + per-block timeline table + final account delta + observed-vs-claimed verdict. v2 will wire post-tick write-back so re-scans don't repeat the same flagged accounts each block. |
+| (2) Business-readable output | **partial (in-process v1)** | `scenario run` executes in-process and renders headline + per-block timeline + final account delta + observed-vs-claimed verdict. **Caveats**: (a) headlines that depend on oracle drift are still labeled "curator claim" because the scenario JSON doesn't drive oracle observations (v2); (b) per-block state isn't fully consistent because post-tick `TickReport` is not yet written back to the bridge, so the same accounts may be re-flagged each tick (also v2). |
 | (3) Parameter dial | partial | Margin params (initial / maintenance / liquidation fee bps) baked into scenario JSON are applied to the `LiquidationParams` at run time. CLI flag overrides on `scenario run` (per-invocation dial) pending. |
 | (4) Scenario replay | **done** | `chain-history` (now via `scenarios/*.json` wrapper) is the replay format. Deterministic, bit-identical across runs. |
 | (5) CTA | **done** | `scenario list` / `show` / `run` all render a three-option CTA footer (adopt engine / custom build / hosted access). |
