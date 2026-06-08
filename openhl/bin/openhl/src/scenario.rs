@@ -12,17 +12,30 @@
 //! spec: pre-baked scenarios / business-readable output / parameter
 //! dial / replay / CTA).
 //!
-//! v0 (this commit): JSON wrapper + list / show / run renderers.
-//! `run` prints the equivalent `reth-devnet --chain-history …`
-//! invocation rather than executing in-process — embedded execution
-//! lands in v1.
+//! v1: in-process execution via [`run_embedded`] — constructs a
+//! `LiveRethEvmBridge<()>` (the unit-provider variant used in
+//! `chain_history` tests), applies the scenario's chain-history
+//! events block by block, ticks the [`OpenHlNode`] coordinator
+//! between events, and renders a headline + per-block timeline +
+//! before/after account delta.
+//!
+//! v0 (legacy [`render_run_v0`]): printed the equivalent
+//! `reth-devnet --chain-history …` invocation. Still exported for
+//! callers that want the dry-run flavour without running.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use rdk_clearing::Account;
+use rdk_funding::MarkPrice;
+use rdk_liquidation::AccountSnapshot;
+use openhl_evm::LiveRethEvmBridge;
+use openhl_node::{OpenHlNode, OpenHlNodeConfig, TickInput};
+use reth_chainspec::ChainSpec;
 use serde::{Deserialize, Serialize};
 
-use crate::chain_history::ChainHistory;
+use crate::chain_history::{ChainHistory, ChainHistoryApplier};
 
 /// Wire shape of a scenario file. Reads as standard JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,13 +67,13 @@ pub struct ScenarioParams {
     pub rounds: Option<u64>,
     /// Initial margin in basis points. Default 1000 (10%).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_margin_bps: Option<u16>,
+    pub initial_margin_bps: Option<u32>,
     /// Maintenance margin in basis points. Default 200 (2%).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub maintenance_margin_bps: Option<u16>,
+    pub maintenance_margin_bps: Option<u32>,
     /// Liquidation fee in basis points. Default 150 (1.5%).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liquidation_fee_bps: Option<u16>,
+    pub liquidation_fee_bps: Option<u32>,
 }
 
 /// Parse a scenario JSON file.
@@ -176,8 +189,216 @@ pub fn render_show(scenario: &Scenario, path: &Path) -> String {
     out
 }
 
+/// v1 embedded execution: actually run the scenario in-process and
+/// render the observed state.
+///
+/// Constructs a `LiveRethEvmBridge<()>` (no Reth boot), applies the
+/// scenario's per-block trades and deposits via [`ChainHistoryApplier`],
+/// ticks [`OpenHlNode`] between events, and produces a headline +
+/// per-block timeline + before/after account delta.
+///
+/// Liquidation cascades require oracle observations (driven from
+/// outside the chain-history format); v1 surfaces account snapshots
+/// into the tick, but oracle ingest is not yet driven from the
+/// scenario JSON, so headline outcomes that depend on oracle (e.g.
+/// "Bob liquidated when oracle drops to 102") are reported as
+/// "curator claim" alongside the observed state. Oracle drive in the
+/// JSON format lands in v2.
+pub fn run_embedded(scenario: &Scenario, rounds_override: Option<u64>) -> eyre::Result<String> {
+    // Build coordinator config with scenario param overrides.
+    let mut config = OpenHlNodeConfig::hyperliquid_default();
+    if let Some(im) = scenario.params.initial_margin_bps {
+        config.liquidation_params.initial_margin_bps = im;
+    }
+    if let Some(mm) = scenario.params.maintenance_margin_bps {
+        config.liquidation_params.maintenance_margin_bps = mm;
+    }
+    if let Some(lf) = scenario.params.liquidation_fee_bps {
+        config.liquidation_params.liquidation_fee_bps = lf;
+    }
+    let mut coordinator = OpenHlNode::new(config);
+
+    // Build the bridge with matching margin params so on-chain and
+    // off-chain reads agree on the threshold.
+    let chain_spec = Arc::new(ChainSpec::default());
+    let bridge = LiveRethEvmBridge::new((), chain_spec)
+        .with_liquidation_params(config.liquidation_params);
+
+    let applier = ChainHistoryApplier::new(scenario.history.clone())?;
+
+    // Initial state — should be empty before any block applies.
+    let initial = bridge.accounts_snapshot();
+
+    let max_height = applier.heights().iter().max().copied().unwrap_or(0);
+    let rounds = rounds_override
+        .or(scenario.params.rounds)
+        .unwrap_or(max_height.saturating_add(2))
+        .max(max_height);
+
+    let mut timeline: Vec<BlockSummary> = Vec::with_capacity(rounds as usize);
+    for height in 1..=rounds {
+        // Apply this block's events (if any) BEFORE the tick — same
+        // ordering as `bin/openhl reth-devnet`'s commit hook.
+        let counts = applier.apply_for_height(&bridge, height)?;
+
+        // Snapshot for tick. Conversion is field-by-field (Stage 16c
+        // comment in main.rs).
+        let snapshots: Vec<AccountSnapshot> = bridge
+            .accounts_snapshot()
+            .into_iter()
+            .map(|a| AccountSnapshot {
+                account: a.account,
+                position_size: a.position_size,
+                avg_entry: a.avg_entry,
+                collateral: a.collateral,
+            })
+            .collect();
+
+        let (mark, mark_source) = match bridge.current_mark() {
+            Some(m) => (m, "clob"),
+            None => (MarkPrice(100), "stub-empty-book"),
+        };
+
+        let report = coordinator.tick(TickInput {
+            block_height: height,
+            block_time: 1000_u64.saturating_mul(height),
+            mark,
+            account_snapshots: &snapshots,
+            vault_total_assets: coordinator.vault().total_assets().0,
+        });
+
+        timeline.push(BlockSummary {
+            height,
+            trades_applied: counts.map_or(0, |c| c.0),
+            fills_produced: counts.map_or(0, |c| c.1),
+            deposits_applied: counts.map_or(0, |c| c.2),
+            mark: mark.0,
+            mark_source,
+            liquidations: report.liquidation.records.len(),
+            adl_fired: report.adl.is_some(),
+            funding_fired: report.funding.is_some(),
+        });
+    }
+
+    let final_accounts = bridge.accounts_snapshot();
+
+    Ok(render_embedded_output(scenario, &initial, &final_accounts, &timeline))
+}
+
+/// Per-block summary captured during embedded execution.
+struct BlockSummary {
+    height: u64,
+    trades_applied: usize,
+    fills_produced: usize,
+    deposits_applied: usize,
+    mark: u64,
+    mark_source: &'static str,
+    liquidations: usize,
+    adl_fired: bool,
+    funding_fired: bool,
+}
+
+fn render_embedded_output(
+    scenario: &Scenario,
+    initial: &[Account],
+    final_accounts: &[Account],
+    timeline: &[BlockSummary],
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "─── scenario: {} ────────────────────────────────────\n",
+        scenario.name
+    ));
+    out.push_str(&format!("HEADLINE (curator claim): {}\n\n", scenario.headline));
+
+    out.push_str("DESCRIPTION:\n");
+    for line in scenario.description.lines() {
+        out.push_str(&format!("  {line}\n"));
+    }
+
+    // Per-block timeline.
+    out.push_str("\nTIMELINE (per-block):\n");
+    out.push_str("  height  mark    src              trades  fills  deposits  liqs  adl  fund\n");
+    out.push_str("  ------  ------  ---------------  ------  -----  --------  ----  ---  ----\n");
+    for b in timeline {
+        out.push_str(&format!(
+            "  {:>6}  {:>6}  {:<15}  {:>6}  {:>5}  {:>8}  {:>4}  {:>3}  {:>4}\n",
+            b.height,
+            b.mark,
+            b.mark_source,
+            b.trades_applied,
+            b.fills_produced,
+            b.deposits_applied,
+            b.liquidations,
+            if b.adl_fired { "yes" } else { "—" },
+            if b.funding_fired { "yes" } else { "—" },
+        ));
+    }
+
+    // Account delta. Initial state is empty for fresh runs, so this is
+    // effectively a "final state" table — but rendered as a delta so
+    // re-runs against a non-empty bridge still display sanely.
+    out.push_str("\nACCOUNT DELTA (final − initial):\n");
+    if final_accounts.is_empty() {
+        out.push_str("  (no accounts touched — chain-history had no deposits or matching trades)\n");
+    } else {
+        out.push_str("  account  collateral  position  avg_entry\n");
+        out.push_str("  -------  ----------  --------  ---------\n");
+        for acct in final_accounts {
+            out.push_str(&format!(
+                "  {:>7}  {:>10}  {:>8}  {:>9}\n",
+                acct.account.0,
+                acct.collateral.0,
+                acct.position_size.0,
+                acct.avg_entry.0,
+            ));
+        }
+        // Echo initial count for completeness.
+        out.push_str(&format!(
+            "  (initial account count: {}, final account count: {})\n",
+            initial.len(),
+            final_accounts.len(),
+        ));
+    }
+
+    let total_liquidations: usize = timeline.iter().map(|b| b.liquidations).sum();
+    let total_fills: usize = timeline.iter().map(|b| b.fills_produced).sum();
+    let observed_match = if total_liquidations > 0 {
+        format!(
+            "✓ liquidation scan flagged accounts ({} scan-hit(s); v1 does not \
+             write the close back to the bridge, so the same accounts may be \
+             re-flagged each tick — v2 will wire the write-back loop)",
+            total_liquidations,
+        )
+    } else {
+        "no liquidations flagged (this is the expected outcome when the chain-\
+        history doesn't produce a mark-vs-entry gap large enough to cross the \
+        maintenance margin)"
+            .to_string()
+    };
+    out.push_str(&format!(
+        "\nOBSERVED: {} fill(s) across {} block(s); {}.\n",
+        total_fills,
+        timeline.len(),
+        observed_match,
+    ));
+
+    out.push_str("\nNOTE: v1 runs the scenario in-process against a unit-provider\n");
+    out.push_str("`LiveRethEvmBridge<()>` (no Reth boot). For the production-shape\n");
+    out.push_str("run (real Reth + Malachite + JSON-RPC), use:\n");
+    out.push_str(&format!(
+        "  openhl reth-devnet --chain-history scenarios/{}.json --rounds {}\n",
+        scenario.name,
+        timeline.len(),
+    ));
+
+    out.push_str(&cta_footer());
+    out
+}
+
 /// Render `scenario run <name>` output. v0 prints the equivalent
-/// `reth-devnet` invocation; embedded execution lands in v1.
+/// `reth-devnet` invocation; kept exported for the optional `--dry-run`
+/// flag — the default `Run` action now goes through [`run_embedded`].
 pub fn render_run_v0(
     scenario: &Scenario,
     path: &Path,
@@ -354,5 +575,42 @@ mod tests {
         let path = PathBuf::from("scenarios/test-cascade.json");
         let out = render_run_v0(&s, &path, Some(42));
         assert!(out.contains("--rounds 42"));
+    }
+
+    #[test]
+    fn run_embedded_executes_and_renders_timeline() {
+        let s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
+        let out = run_embedded(&s, None).expect("embedded run ok");
+        assert!(out.contains("HEADLINE (curator claim)"));
+        assert!(out.contains("TIMELINE (per-block)"));
+        assert!(out.contains("height  mark"));
+        assert!(out.contains("ACCOUNT DELTA"));
+        assert!(out.contains("OBSERVED"));
+        assert!(out.contains("NEXT:"));
+    }
+
+    #[test]
+    fn run_embedded_runs_at_least_max_height_blocks() {
+        // The minimal fixture has one event at height 1; with no rounds
+        // override and no rounds in params (the minimal fixture has
+        // params.rounds = Some(5)), should run 5 blocks.
+        let s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
+        let out = run_embedded(&s, None).expect("embedded run ok");
+        // Five rows of timeline output (heights 1..=5).
+        let timeline_rows = out.matches("       1 ").count()
+            + out.matches("       2 ").count()
+            + out.matches("       3 ").count()
+            + out.matches("       4 ").count()
+            + out.matches("       5 ").count();
+        assert!(timeline_rows >= 5, "expected >=5 timeline rows, got:\n{out}");
+    }
+
+    #[test]
+    fn run_embedded_creates_account_from_deposit() {
+        let s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
+        let out = run_embedded(&s, None).expect("embedded run ok");
+        // Minimal fixture deposits 1000 to account 10.
+        assert!(out.contains("(initial account count: 0, final account count: 1)"));
+        assert!(out.contains("      10"));
     }
 }

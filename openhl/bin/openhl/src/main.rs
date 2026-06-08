@@ -259,9 +259,10 @@ enum ScenarioAction {
         #[arg(long, default_value = "scenarios")]
         dir: PathBuf,
     },
-    /// Print the equivalent `reth-devnet` invocation to execute this
-    /// scenario. (Embedded in-CLI execution with headline + delta
-    /// rendering lands in v1.)
+    /// Run the scenario in-process and render a headline + per-block
+    /// timeline + before/after account delta. Pass `--dry-run` to fall
+    /// back to v0 behavior (print the equivalent `reth-devnet`
+    /// invocation without executing).
     Run {
         /// Scenario name (file stem without `.json`).
         name: String,
@@ -270,6 +271,12 @@ enum ScenarioAction {
         /// Override the default round count baked into the scenario.
         #[arg(long)]
         rounds: Option<u64>,
+        /// Skip embedded execution; print the equivalent reth-devnet
+        /// invocation instead. Use when you want the long-running
+        /// production-shape node (real Reth + Malachite + JSON-RPC)
+        /// rather than the in-process bridge.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -363,10 +370,15 @@ fn run_scenario(action: ScenarioAction) -> eyre::Result<()> {
             print!("{}", scenario::render_show(&s, &path));
             Ok(())
         }
-        ScenarioAction::Run { name, dir, rounds } => {
+        ScenarioAction::Run { name, dir, rounds, dry_run } => {
             let path = dir.join(format!("{name}.json"));
             let s = scenario::load_from_path(&path)?;
-            print!("{}", scenario::render_run_v0(&s, &path, rounds));
+            if dry_run {
+                print!("{}", scenario::render_run_v0(&s, &path, rounds));
+            } else {
+                let out = scenario::run_embedded(&s, rounds)?;
+                print!("{}", out);
+            }
             Ok(())
         }
     }
