@@ -240,12 +240,14 @@ pub fn run_embedded(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedRe
         // — route those through `sh -c` with PATH augmented so
         // `princeps` resolves to the current binary. Non-meta commands
         // keep the direct-spawn path with princeps→current_exe rewrite.
+        //
+        // `<` and `>` are intentionally excluded — scenarios use
+        // `<PLACEHOLDER>` syntax for operator-substituted values, and
+        // treating them as shell redirects would break those steps.
         let has_shell_metas = trimmed.contains("&&")
             || trimmed.contains("||")
             || trimmed.contains(';')
-            || trimmed.contains('|')
-            || trimmed.contains('>')
-            || trimmed.contains('<');
+            || trimmed.contains('|');
 
         let mut cmd = if has_shell_metas {
             let mut c = Command::new("sh");
