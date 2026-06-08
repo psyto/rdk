@@ -1,37 +1,37 @@
 {
   "name": "manual-lending-walkthrough",
   "category": "lending-walkthrough",
-  "description": "Step-by-step walkthrough of the hands-on `lending` subcommand family. State is persisted to `$HOME/.princeps/lending-state.json` between commands, so you can inspect after each step, change parameters, and re-check. Useful for evaluating individual flows (deposit / borrow / health-check / scan) without committing to the all-in-one demo. Pair with `princeps lending list` between any two steps to see the full position state.",
-  "headline": "Walk the lending sandbox by hand: deposit, borrow, check health, scan for underwater positions.",
+  "description": "Self-contained walkthrough of the hands-on `lending` subcommand family. Every step routes through a scenario-local state file (`.princeps-walkthrough-state.json` in the current directory) so residue from prior runs or from the default `$HOME/.princeps/lending-state.json` cannot leak in. Pair with `princeps lending list --state-file ./.princeps-walkthrough-state.json` between any two steps to inspect the position state. After the scenario, the file can be safely deleted: `rm -f ./.princeps-walkthrough-state.json`.",
+  "headline": "Walk the lending sandbox by hand — deposit, borrow, check health, scan — against a clean per-scenario state file.",
   "steps": [
     {
-      "explanation": "Initialize an empty lending state file (idempotent — safe to re-run).",
-      "command": "princeps lending init"
+      "explanation": "Initialize an empty lending state file at a scenario-local path. The Init subcommand overwrites any existing file, so re-running the scenario always starts clean.",
+      "command": "princeps lending init --state-file ./.princeps-walkthrough-state.json"
     },
     {
       "explanation": "Account 1 deposits 1000 USDC as collateral.",
-      "command": "princeps lending deposit 1 1000"
+      "command": "princeps lending deposit 1 1000 --state-file ./.princeps-walkthrough-state.json"
     },
     {
       "explanation": "Account 1 borrows 200 ETH at the current oracle price of 1 USDC/ETH.",
-      "command": "princeps lending borrow 1 200 --eth-price 1"
+      "command": "princeps lending borrow 1 200 --eth-price 1 --state-file ./.princeps-walkthrough-state.json"
     },
     {
       "explanation": "Check account 1's health at the same price — should be HEALTHY.",
-      "command": "princeps lending health 1 --eth-price 1",
+      "command": "princeps lending health 1 --eth-price 1 --state-file ./.princeps-walkthrough-state.json",
       "expect": "Healthy"
     },
     {
       "explanation": "Now check health at an ETH price of 2 — the debt is worth more in USDC terms.",
-      "command": "princeps lending health 1 --eth-price 2"
+      "command": "princeps lending health 1 --eth-price 2 --state-file ./.princeps-walkthrough-state.json"
     },
     {
       "explanation": "Scan all accounts for underwater positions at ETH=2.",
-      "command": "princeps lending scan --eth-price 2"
+      "command": "princeps lending scan --eth-price 2 --state-file ./.princeps-walkthrough-state.json"
     },
     {
       "explanation": "Inspect the full state file.",
-      "command": "princeps lending list"
+      "command": "princeps lending list --state-file ./.princeps-walkthrough-state.json"
     }
   ]
 }

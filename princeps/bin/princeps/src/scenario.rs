@@ -235,19 +235,7 @@ pub fn run_embedded(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedRe
             continue;
         }
 
-        // Shell-metacharacter detection: steps that chain commands via
-        // `&&`, `||`, `;`, or pipes can't be naïvely whitespace-split
-        // — route those through `sh -c` with PATH augmented so
-        // `princeps` resolves to the current binary. Non-meta commands
-        // keep the direct-spawn path with princeps→current_exe rewrite.
-        //
-        // `<` and `>` are intentionally excluded — scenarios use
-        // `<PLACEHOLDER>` syntax for operator-substituted values, and
-        // treating them as shell redirects would break those steps.
-        let has_shell_metas = trimmed.contains("&&")
-            || trimmed.contains("||")
-            || trimmed.contains(';')
-            || trimmed.contains('|');
+        let has_shell_metas = has_shell_metacharacters(trimmed);
 
         let mut cmd = if has_shell_metas {
             let mut c = Command::new("sh");
@@ -322,6 +310,21 @@ pub fn run_embedded(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedRe
     print!("{}", cta_footer());
 
     Ok(report)
+}
+
+/// Detect whether `command` contains shell metacharacters that mean it
+/// can't be naïvely whitespace-split into argv. Returns true for
+/// command chains (`&&`, `||`, `;`) and pipes (`|`).
+///
+/// **Intentionally excluded**: `<` and `>`. Curated scenarios use
+/// `<PLACEHOLDER>` syntax for operator-substituted values, and
+/// treating those as shell redirects breaks every placeholder step.
+/// Real shell redirects are not used in any shipped scenario.
+pub fn has_shell_metacharacters(command: &str) -> bool {
+    command.contains("&&")
+        || command.contains("||")
+        || command.contains(';')
+        || command.contains('|')
 }
 
 /// Summary of an embedded scenario run. Returned so callers (e.g.,
@@ -399,5 +402,35 @@ mod tests {
         assert!(out.contains("$ princeps lending-demo --eth-crash-price 90"));
         assert!(out.contains("expect output to include: unified HEALTHY"));
         assert!(out.contains("NEXT:"));
+    }
+
+    /// Regression tests for shell-metachar detection. The runner
+    /// branches on this; both branches have failed in distinct ways
+    /// in this session's history, so the detection is locked in here.
+
+    #[test]
+    fn metachar_routes_chains_through_sh() {
+        assert!(has_shell_metacharacters("princeps lending init && princeps lending deposit 1 100"));
+        assert!(has_shell_metacharacters("a || b"));
+        assert!(has_shell_metacharacters("a; b"));
+        assert!(has_shell_metacharacters("a | grep b"));
+    }
+
+    /// Regression: scenarios use `<PLACEHOLDER>` for operator-
+    /// substituted values. Treating `<` / `>` as metachars would
+    /// route every placeholder-bearing step through `sh -c`, where
+    /// the placeholder is parsed as a stdin redirect.
+    #[test]
+    fn metachar_does_not_match_angle_bracket_placeholders() {
+        assert!(!has_shell_metacharacters(
+            "princeps lending deposit <ACCOUNT> 1000"
+        ));
+        assert!(!has_shell_metacharacters("cmd <input> output"));
+    }
+
+    #[test]
+    fn metachar_does_not_match_plain_commands() {
+        assert!(!has_shell_metacharacters("princeps lending-demo --eth-crash-price 90"));
+        assert!(!has_shell_metacharacters("princeps lending init"));
     }
 }
