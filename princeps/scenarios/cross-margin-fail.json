@@ -1,13 +1,36 @@
 {
   "name": "cross-margin-fail",
   "category": "stress",
-  "description": "Same setup as `cross-margin-survival` but with a much deeper crash: ETH drops from $100 to $50 (a 50% move). At this point even Alice's perp position's unrealized PnL is not enough to absorb the lending health hit. Unified margin breaks alongside siloed margin; the liquidation engine fires and the position is unwound. This is the negative control: it proves cross-margin doesn't make the system invulnerable, only better at netting risks within bounds.",
-  "headline": "A 50% ETH crash overwhelms even cross-margin; the liquidation engine fires.",
+  "description": "Same fixed setup as `cross-margin-survival` (1000 USDC collateral, 5 ETH debt, 10 perp contracts @ entry 100, 50 USDC perp margin) but at a much deeper crash: ETH drops from $100 to $50. The siloed perp leg blows out catastrophically. But the unified portfolio's math (5X + 50, where X = crash price) stays positive for any positive ETH — within these fixed parameters, cross-margin is structurally robust to even a 50% crash. This is the negative-control insight: under THIS setup, finding a unified-fail price requires modifying the setup (larger debt, bigger perp position, or both). Pair with `cross-margin-survival` to see the gap between siloed-liquidation thresholds and unified-margin thresholds widen as the crash deepens.",
+  "headline": "A 50% ETH crash blows out the siloed perp leg, but cross-margin keeps Alice HEALTHY under this fixed setup.",
   "steps": [
     {
-      "explanation": "Same lending-demo flow, deeper crash. The CLI output should show unified margin moving to LIQUIDATABLE (or Underwater) instead of HEALTHY.",
+      "explanation": "Same lending-demo flow, much deeper crash. The CLI output should show siloed=LIQUIDATABLE and unified still HEALTHY (the gap is the netting margin).",
       "command": "princeps lending-demo --eth-crash-price 50",
       "expect": "LIQUIDATABLE"
+    }
+  ],
+  "expected_outcomes": [
+    {
+      "name": "siloed-blows-out",
+      "description": "Siloed perp-only view marks Alice as LIQUIDATABLE",
+      "check": {
+        "siloed_verdict": "LIQUIDATABLE"
+      }
+    },
+    {
+      "name": "unified-still-healthy",
+      "description": "Unified portfolio remains HEALTHY even at a 50% crash",
+      "check": {
+        "unified_verdict": "HEALTHY"
+      }
+    },
+    {
+      "name": "siloed-deeply-negative",
+      "description": "Siloed free equity is at most -400 (well below survival)",
+      "check": {
+        "siloed_free_max": -400
+      }
     }
   ]
 }

@@ -32,5 +32,28 @@
         ]
       }
     ]
-  }
+  },
+  "expected_outcomes": [
+    {
+      "name": "five-accounts-created",
+      "description": "Five trading accounts exist after the single-block setup",
+      "check": {
+        "final_account_count": 5
+      }
+    },
+    {
+      "name": "four-fills",
+      "description": "Four fills (the four market buys crossing the resting sells)",
+      "check": {
+        "fills_min": 4
+      }
+    },
+    {
+      "name": "liquidation-scan-fires",
+      "description": "The liquidation scanner flags accounts after the mark-book settles",
+      "check": {
+        "liquidations_min": 2
+      }
+    }
+  ]
 }

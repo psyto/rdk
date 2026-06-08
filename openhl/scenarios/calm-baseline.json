@@ -35,5 +35,35 @@
         ]
       }
     ]
-  }
+  },
+  "expected_outcomes": [
+    {
+      "name": "two-accounts-only",
+      "description": "Exactly two accounts (the balanced pair) exist after the run",
+      "check": {
+        "final_account_count": 2
+      }
+    },
+    {
+      "name": "single-fill",
+      "description": "Exactly one fill (the single matched trade) — no churn",
+      "check": {
+        "fills_min": 1
+      }
+    },
+    {
+      "name": "fills-bounded",
+      "description": "No extra fills",
+      "check": {
+        "fills_max": 1
+      }
+    },
+    {
+      "name": "no-liquidations",
+      "description": "Zero liquidation scan-hits across all blocks (this is the baseline)",
+      "check": {
+        "liquidations_max": 0
+      }
+    }
+  ]
 }

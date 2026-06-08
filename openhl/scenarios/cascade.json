@@ -42,5 +42,56 @@
         ]
       }
     ]
-  }
+  },
+  "expected_outcomes": [
+    {
+      "name": "five-accounts-created",
+      "description": "Five trading accounts exist after the chain history applies",
+      "check": {
+        "final_account_count": 5
+      }
+    },
+    {
+      "name": "four-fills",
+      "description": "Exactly four fills (the four market buys crossing the resting sells)",
+      "check": {
+        "fills_min": 4
+      }
+    },
+    {
+      "name": "fills-bounded",
+      "description": "No surprise fills beyond the four buys",
+      "check": {
+        "fills_max": 4
+      }
+    },
+    {
+      "name": "mark-drops-to-96",
+      "description": "Mark settles to 96 once the block-3 mark-book lands (Buy 95 / Sell 97 → midpoint 96)",
+      "check": {
+        "final_mark_max": 96
+      }
+    },
+    {
+      "name": "liquidation-scan-fires",
+      "description": "The liquidation scanner flags at least 4 accounts across post-cascade blocks",
+      "check": {
+        "liquidations_min": 4
+      }
+    },
+    {
+      "name": "alice-long-10",
+      "description": "Alice (account 10) ends with a +10 long perp position",
+      "check": {
+        "account_position": {"account": 10, "expected": 10}
+      }
+    },
+    {
+      "name": "dave-short-50",
+      "description": "Dave (account 40) ends with a -50 short (the maker that sold into the longs)",
+      "check": {
+        "account_position": {"account": 40, "expected": -50}
+      }
+    }
+  ]
 }

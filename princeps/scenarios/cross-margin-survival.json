@@ -9,5 +9,35 @@
       "command": "princeps lending-demo --eth-crash-price 90",
       "expect": "unified HEALTHY"
     }
+  ],
+  "expected_outcomes": [
+    {
+      "name": "siloed-liquidatable",
+      "description": "Siloed perp-only view marks Alice as LIQUIDATABLE",
+      "check": {
+        "siloed_verdict": "LIQUIDATABLE"
+      }
+    },
+    {
+      "name": "unified-healthy",
+      "description": "Unified portfolio (perp + lending) keeps Alice HEALTHY",
+      "check": {
+        "unified_verdict": "HEALTHY"
+      }
+    },
+    {
+      "name": "siloed-free-negative",
+      "description": "Siloed free equity is strictly negative (the trigger that would liquidate)",
+      "check": {
+        "siloed_free_max": -1
+      }
+    },
+    {
+      "name": "unified-free-positive",
+      "description": "Unified free equity stays positive (the netting that saves her)",
+      "check": {
+        "unified_free_min": 1
+      }
+    }
   ]
 }

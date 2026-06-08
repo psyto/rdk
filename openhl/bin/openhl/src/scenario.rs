@@ -54,6 +54,55 @@ pub struct Scenario {
     pub params: ScenarioParams,
     /// Per-block events. Same shape as `--chain-history`.
     pub history: ChainHistory,
+    /// v2 Phase 3: optional declarative outcome checks. When present,
+    /// each check is evaluated against the captured execution result
+    /// and rendered as `✓` / `✗` in the OUTCOMES section. When all
+    /// checks pass, the HEADLINE gets a ✓ badge; when any fail, ⚠.
+    /// When no checks are declared the HEADLINE is "(unverified)".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_outcomes: Vec<ExpectedOutcome>,
+}
+
+/// v2 Phase 3 — one declarative outcome a scenario claims to demonstrate.
+/// `check` is engine-specific; for openhl it is an [`OpenHlCheck`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedOutcome {
+    pub name: String,
+    pub description: String,
+    pub check: OpenHlCheck,
+}
+
+/// Engine-specific check schema for openhl. JSON-serialized as
+/// externally-tagged so authors write `{"liquidations_min": 4}` rather
+/// than `{"kind": "liquidations_min", "value": 4}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenHlCheck {
+    /// Assert total liquidation scan-hits across all blocks is at least N.
+    LiquidationsMin(usize),
+    /// Assert total liquidation scan-hits is at most N.
+    LiquidationsMax(usize),
+    /// Assert total fills produced across all blocks is at least N.
+    FillsMin(usize),
+    /// Assert total fills produced is at most N.
+    FillsMax(usize),
+    /// Assert exact final account count (after all blocks).
+    FinalAccountCount(usize),
+    /// Assert the final-block mark is at most N.
+    FinalMarkMax(u64),
+    /// Assert the final-block mark is at least N.
+    FinalMarkMin(u64),
+    /// Assert a specific account's final collateral equals `expected`.
+    AccountCollateral { account: u64, expected: i64 },
+    /// Assert a specific account's final position size equals `expected`.
+    AccountPosition { account: u64, expected: i64 },
+}
+
+/// Per-outcome evaluation status used in the OUTCOMES section.
+#[derive(Debug, Clone)]
+pub enum OutcomeStatus {
+    Pass,
+    Fail(String),
 }
 
 /// Default parameters baked into the scenario file. Each is optional;
@@ -286,7 +335,7 @@ pub fn run_embedded(scenario: &Scenario, rounds_override: Option<u64>) -> eyre::
 }
 
 /// Per-block summary captured during embedded execution.
-struct BlockSummary {
+pub struct BlockSummary {
     height: u64,
     trades_applied: usize,
     fills_produced: usize,
@@ -296,6 +345,104 @@ struct BlockSummary {
     liquidations: usize,
     adl_fired: bool,
     funding_fired: bool,
+}
+
+/// Evaluate one [`OpenHlCheck`] against the captured run state.
+pub fn evaluate_openhl_check(
+    check: &OpenHlCheck,
+    final_accounts: &[Account],
+    timeline: &[BlockSummary],
+) -> OutcomeStatus {
+    let total_liquidations: usize = timeline.iter().map(|b| b.liquidations).sum();
+    let total_fills: usize = timeline.iter().map(|b| b.fills_produced).sum();
+    let final_mark = timeline.last().map(|b| b.mark).unwrap_or(0);
+
+    match check {
+        OpenHlCheck::LiquidationsMin(min) => {
+            if total_liquidations >= *min {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed total liquidation scan-hits = {total_liquidations} (expected ≥ {min})"
+                ))
+            }
+        }
+        OpenHlCheck::LiquidationsMax(max) => {
+            if total_liquidations <= *max {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed total liquidation scan-hits = {total_liquidations} (expected ≤ {max})"
+                ))
+            }
+        }
+        OpenHlCheck::FillsMin(min) => {
+            if total_fills >= *min {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed total fills = {total_fills} (expected ≥ {min})"
+                ))
+            }
+        }
+        OpenHlCheck::FillsMax(max) => {
+            if total_fills <= *max {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed total fills = {total_fills} (expected ≤ {max})"
+                ))
+            }
+        }
+        OpenHlCheck::FinalAccountCount(expected) => {
+            if final_accounts.len() == *expected {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed final account count = {}",
+                    final_accounts.len()
+                ))
+            }
+        }
+        OpenHlCheck::FinalMarkMax(max) => {
+            if final_mark <= *max {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed final mark = {final_mark} (expected ≤ {max})"
+                ))
+            }
+        }
+        OpenHlCheck::FinalMarkMin(min) => {
+            if final_mark >= *min {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed final mark = {final_mark} (expected ≥ {min})"
+                ))
+            }
+        }
+        OpenHlCheck::AccountCollateral { account, expected } => {
+            match final_accounts.iter().find(|a| a.account.0 == *account) {
+                Some(a) if a.collateral.0 == *expected => OutcomeStatus::Pass,
+                Some(a) => OutcomeStatus::Fail(format!(
+                    "account {account} collateral = {} (expected {expected})",
+                    a.collateral.0
+                )),
+                None => OutcomeStatus::Fail(format!("account {account} not in final state")),
+            }
+        }
+        OpenHlCheck::AccountPosition { account, expected } => {
+            match final_accounts.iter().find(|a| a.account.0 == *account) {
+                Some(a) if a.position_size.0 == *expected => OutcomeStatus::Pass,
+                Some(a) => OutcomeStatus::Fail(format!(
+                    "account {account} position = {} (expected {expected})",
+                    a.position_size.0
+                )),
+                None => OutcomeStatus::Fail(format!("account {account} not in final state")),
+            }
+        }
+    }
 }
 
 fn render_embedded_output(
@@ -309,7 +456,25 @@ fn render_embedded_output(
         "─── scenario: {} ────────────────────────────────────\n",
         scenario.name
     ));
-    out.push_str(&format!("HEADLINE (curator claim): {}\n\n", scenario.headline));
+
+    // Evaluate expected_outcomes for the HEADLINE badge.
+    let evaluated: Vec<(&ExpectedOutcome, OutcomeStatus)> = scenario
+        .expected_outcomes
+        .iter()
+        .map(|o| (o, evaluate_openhl_check(&o.check, final_accounts, timeline)))
+        .collect();
+    let any_failed = evaluated
+        .iter()
+        .any(|(_, s)| matches!(s, OutcomeStatus::Fail(_)));
+    let has_outcomes = !evaluated.is_empty();
+
+    if has_outcomes && !any_failed {
+        out.push_str(&format!("HEADLINE ✓: {}\n\n", scenario.headline));
+    } else if has_outcomes && any_failed {
+        out.push_str(&format!("HEADLINE ⚠: {}\n\n", scenario.headline));
+    } else {
+        out.push_str(&format!("HEADLINE (unverified): {}\n\n", scenario.headline));
+    }
 
     out.push_str("DESCRIPTION:\n");
     for line in scenario.description.lines() {
@@ -361,27 +526,35 @@ fn render_embedded_output(
         ));
     }
 
-    let total_liquidations: usize = timeline.iter().map(|b| b.liquidations).sum();
-    let total_fills: usize = timeline.iter().map(|b| b.fills_produced).sum();
-    let observed_match = if total_liquidations > 0 {
-        format!(
-            "✓ liquidation scan flagged accounts ({} scan-hit(s); v1 does not \
-             write the close back to the bridge, so the same accounts may be \
-             re-flagged each tick — v2 will wire the write-back loop)",
+    // OUTCOMES section (replaces the prior "OBSERVED" line).
+    out.push_str("\nOUTCOMES:\n");
+    if evaluated.is_empty() {
+        out.push_str("  (no expected_outcomes declared — HEADLINE shown as unverified)\n");
+        // Keep the v1 observed-state summary inline so even unverified
+        // runs surface the headline numbers.
+        let total_liquidations: usize = timeline.iter().map(|b| b.liquidations).sum();
+        let total_fills: usize = timeline.iter().map(|b| b.fills_produced).sum();
+        out.push_str(&format!(
+            "  Observed: {} fill(s) across {} block(s), {} liquidation scan-hit(s).\n",
+            total_fills,
+            timeline.len(),
             total_liquidations,
-        )
+        ));
     } else {
-        "no liquidations flagged (this is the expected outcome when the chain-\
-        history doesn't produce a mark-vs-entry gap large enough to cross the \
-        maintenance margin)"
-            .to_string()
-    };
-    out.push_str(&format!(
-        "\nOBSERVED: {} fill(s) across {} block(s); {}.\n",
-        total_fills,
-        timeline.len(),
-        observed_match,
-    ));
+        for (outcome, status) in &evaluated {
+            match status {
+                OutcomeStatus::Pass => out.push_str(&format!("  ✓ {}\n", outcome.description)),
+                OutcomeStatus::Fail(why) => {
+                    out.push_str(&format!("  ✗ {} ({why})\n", outcome.description));
+                }
+            }
+        }
+        let passed = evaluated
+            .iter()
+            .filter(|(_, s)| matches!(s, OutcomeStatus::Pass))
+            .count();
+        out.push_str(&format!("\n  {passed} of {} outcome(s) verified.\n", evaluated.len()));
+    }
 
     out.push_str("\nNOTE: v1 runs the scenario in-process against a unit-provider\n");
     out.push_str("`LiveRethEvmBridge<()>` (no Reth boot). For the production-shape\n");
@@ -581,11 +754,12 @@ mod tests {
     fn run_embedded_executes_and_renders_timeline() {
         let s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
         let out = run_embedded(&s, None).expect("embedded run ok");
-        assert!(out.contains("HEADLINE (curator claim)"));
+        // minimal fixture has no expected_outcomes → unverified badge
+        assert!(out.contains("HEADLINE (unverified):"));
         assert!(out.contains("TIMELINE (per-block)"));
         assert!(out.contains("height  mark"));
         assert!(out.contains("ACCOUNT DELTA"));
-        assert!(out.contains("OBSERVED"));
+        assert!(out.contains("OUTCOMES:"));
         assert!(out.contains("NEXT:"));
     }
 
@@ -612,5 +786,172 @@ mod tests {
         // Minimal fixture deposits 1000 to account 10.
         assert!(out.contains("(initial account count: 0, final account count: 1)"));
         assert!(out.contains("      10"));
+    }
+
+    /// Phase 3: expected_outcomes parsing + evaluation.
+
+    fn fake_timeline(liquidations: usize, fills: usize, mark: u64) -> Vec<BlockSummary> {
+        vec![BlockSummary {
+            height: 1,
+            trades_applied: 0,
+            fills_produced: fills,
+            deposits_applied: 0,
+            mark,
+            mark_source: "clob",
+            liquidations,
+            adl_fired: false,
+            funding_fired: false,
+        }]
+    }
+
+    #[test]
+    fn evaluate_openhl_check_liquidations_min() {
+        let timeline = fake_timeline(4, 0, 96);
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::LiquidationsMin(4), &[], &timeline),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::LiquidationsMin(5), &[], &timeline),
+            OutcomeStatus::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn evaluate_openhl_check_fills_bounds() {
+        let timeline = fake_timeline(0, 4, 100);
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::FillsMin(4), &[], &timeline),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::FillsMax(4), &[], &timeline),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::FillsMax(3), &[], &timeline),
+            OutcomeStatus::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn evaluate_openhl_check_final_mark() {
+        let timeline = fake_timeline(0, 0, 96);
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::FinalMarkMax(96), &[], &timeline),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::FinalMarkMin(96), &[], &timeline),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::FinalMarkMax(95), &[], &timeline),
+            OutcomeStatus::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn evaluate_openhl_check_account_position() {
+        use rdk_clearing::Account;
+        use rdk_clob::AccountId as ClobAccountId;
+        use rdk_funding::{MarkPrice as MP, Notional, PositionSize as PS};
+
+        let accounts = vec![Account {
+            account: ClobAccountId(10),
+            position_size: PS(10),
+            avg_entry: MP(110),
+            collateral: Notional(200),
+        }];
+        let timeline = fake_timeline(0, 0, 100);
+        assert!(matches!(
+            evaluate_openhl_check(
+                &OpenHlCheck::AccountPosition { account: 10, expected: 10 },
+                &accounts,
+                &timeline
+            ),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(
+                &OpenHlCheck::AccountPosition { account: 10, expected: 99 },
+                &accounts,
+                &timeline
+            ),
+            OutcomeStatus::Fail(_)
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(
+                &OpenHlCheck::AccountPosition { account: 999, expected: 0 },
+                &accounts,
+                &timeline
+            ),
+            OutcomeStatus::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn scenario_with_expected_outcomes_round_trips() {
+        let json = r#"{
+            "name": "test",
+            "category": "stress",
+            "description": "test",
+            "headline": "test",
+            "params": {"rounds": 3},
+            "history": {"blocks": []},
+            "expected_outcomes": [
+                {
+                    "name": "liq",
+                    "description": "min 4 liquidations",
+                    "check": {"liquidations_min": 4}
+                },
+                {
+                    "name": "acct",
+                    "description": "alice has +10",
+                    "check": {"account_position": {"account": 10, "expected": 10}}
+                }
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).expect("parse");
+        assert_eq!(s.expected_outcomes.len(), 2);
+        assert!(matches!(
+            s.expected_outcomes[0].check,
+            OpenHlCheck::LiquidationsMin(4)
+        ));
+    }
+
+    #[test]
+    fn scenario_without_expected_outcomes_still_parses() {
+        let json = minimal_scenario_json();
+        let s: Scenario = serde_json::from_str(json).expect("parse");
+        assert!(s.expected_outcomes.is_empty());
+    }
+
+    #[test]
+    fn run_embedded_renders_headline_badge_when_outcomes_pass() {
+        let mut s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
+        s.expected_outcomes = vec![ExpectedOutcome {
+            name: "acct".to_string(),
+            description: "account 10 exists with 1000 collateral".to_string(),
+            check: OpenHlCheck::AccountCollateral {
+                account: 10,
+                expected: 1000,
+            },
+        }];
+        let out = run_embedded(&s, None).expect("ok");
+        assert!(out.contains("HEADLINE ✓:"), "expected ✓ badge; got:\n{out}");
+        assert!(out.contains("1 of 1 outcome(s) verified."));
+    }
+
+    #[test]
+    fn run_embedded_renders_headline_warning_when_outcomes_fail() {
+        let mut s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
+        s.expected_outcomes = vec![ExpectedOutcome {
+            name: "bad".to_string(),
+            description: "deliberately fails".to_string(),
+            check: OpenHlCheck::FillsMin(9999),
+        }];
+        let out = run_embedded(&s, None).expect("ok");
+        assert!(out.contains("HEADLINE ⚠:"), "expected ⚠ badge; got:\n{out}");
     }
 }

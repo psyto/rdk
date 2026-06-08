@@ -68,6 +68,117 @@ pub struct Scenario {
     pub description: String,
     pub headline: String,
     pub steps: Vec<ScenarioStep>,
+    /// v2 Phase 3: optional declarative outcome checks. When present
+    /// and the runner is v2-eligible, each check is evaluated against
+    /// the captured execution result and rendered as `✓` / `✗` in the
+    /// OUTCOMES section. When all checks pass, the HEADLINE drops the
+    /// "(curator claim)" qualifier. When any fail or none are declared
+    /// the qualifier remains.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_outcomes: Vec<ExpectedOutcome>,
+}
+
+/// One declarative outcome a scenario claims to demonstrate. `check`
+/// is engine-specific; for princeps it is a [`LendingCheck`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedOutcome {
+    /// Short identifier (kebab-case, no spaces). Echoed in OUTCOMES.
+    pub name: String,
+    /// One-line description in business language.
+    pub description: String,
+    pub check: LendingCheck,
+}
+
+/// Engine-specific check schema for princeps. JSON-serialized using
+/// externally-tagged form so authors write `{"unified_verdict": "HEALTHY"}`
+/// rather than `{"kind": "unified_verdict", "value": "HEALTHY"}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LendingCheck {
+    /// Assert the siloed-perp verdict string. Accepts "LIQUIDATABLE" or "HEALTHY".
+    SiloedVerdict(String),
+    /// Assert the unified-portfolio verdict string.
+    UnifiedVerdict(String),
+    /// Assert the siloed free equity is at most this value.
+    SiloedFreeMax(i128),
+    /// Assert the siloed free equity is at least this value.
+    SiloedFreeMin(i128),
+    /// Assert the unified free equity is at most this value.
+    UnifiedFreeMax(i128),
+    /// Assert the unified free equity is at least this value.
+    UnifiedFreeMin(i128),
+}
+
+/// Per-outcome evaluation status used in the OUTCOMES section.
+#[derive(Debug, Clone)]
+pub enum OutcomeStatus {
+    Pass,
+    Fail(String),
+}
+
+/// Evaluate one check against a [`LendingDemoResult`].
+pub fn evaluate_lending_check(
+    check: &LendingCheck,
+    result: &crate::LendingDemoResult,
+) -> OutcomeStatus {
+    match check {
+        LendingCheck::SiloedVerdict(expected) => {
+            let observed = result.siloed_verdict();
+            if observed == expected.as_str() {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!("observed siloed verdict = {observed}"))
+            }
+        }
+        LendingCheck::UnifiedVerdict(expected) => {
+            let observed = result.unified_verdict();
+            if observed == expected.as_str() {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!("observed unified verdict = {observed}"))
+            }
+        }
+        LendingCheck::SiloedFreeMax(max) => {
+            if result.siloed_free_equity <= *max {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed siloed free = {} (expected ≤ {max})",
+                    result.siloed_free_equity
+                ))
+            }
+        }
+        LendingCheck::SiloedFreeMin(min) => {
+            if result.siloed_free_equity >= *min {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed siloed free = {} (expected ≥ {min})",
+                    result.siloed_free_equity
+                ))
+            }
+        }
+        LendingCheck::UnifiedFreeMax(max) => {
+            if result.unified_free_equity <= *max {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed unified free = {} (expected ≤ {max})",
+                    result.unified_free_equity
+                ))
+            }
+        }
+        LendingCheck::UnifiedFreeMin(min) => {
+            if result.unified_free_equity >= *min {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed unified free = {} (expected ≥ {min})",
+                    result.unified_free_equity
+                ))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,8 +420,23 @@ fn render_v2_sections(
     results: &[StepResult],
     report: &EmbeddedReport,
 ) {
-    // HEADLINE — for now echo scenario.headline (Phase 3 will verify it).
-    println!("HEADLINE: {}", scenario.headline);
+    // Evaluate expected_outcomes up-front so HEADLINE can carry a
+    // verification badge.
+    let evaluated_outcomes = evaluate_all_outcomes(scenario, results);
+    let any_failed = evaluated_outcomes
+        .iter()
+        .any(|(_, status)| matches!(status, OutcomeStatus::Fail(_)));
+    let has_outcomes = !evaluated_outcomes.is_empty();
+
+    // HEADLINE — verified ✓ when all outcomes pass; ⚠ when any fail;
+    // plain (no badge) when no outcomes declared.
+    if has_outcomes && !any_failed {
+        println!("HEADLINE ✓: {}", scenario.headline);
+    } else if has_outcomes && any_failed {
+        println!("HEADLINE ⚠: {}", scenario.headline);
+    } else {
+        println!("HEADLINE (unverified): {}", scenario.headline);
+    }
     println!();
 
     // TIMELINE — derive from each captured result. For LendingDemo,
@@ -368,11 +494,27 @@ fn render_v2_sections(
     }
     println!();
 
-    // OUTCOMES — v2 Phase 3 will parse expected_outcomes from JSON and
-    // verify them. Until then, emit a placeholder so the contract
-    // section is always present.
+    // OUTCOMES — render each evaluated outcome.
     println!("OUTCOMES:");
-    println!("  (no expected_outcomes declared — Phase 3 will add JSON-driven verification)");
+    if evaluated_outcomes.is_empty() {
+        println!("  (no expected_outcomes declared — HEADLINE shown as unverified)");
+    } else {
+        for (outcome, status) in &evaluated_outcomes {
+            match status {
+                OutcomeStatus::Pass => println!("  ✓ {}", outcome.description),
+                OutcomeStatus::Fail(why) => {
+                    println!("  ✗ {} ({why})", outcome.description);
+                }
+            }
+        }
+        let passed = evaluated_outcomes
+            .iter()
+            .filter(|(_, s)| matches!(s, OutcomeStatus::Pass))
+            .count();
+        let total = evaluated_outcomes.len();
+        println!();
+        println!("  {passed} of {total} outcome(s) verified.");
+    }
     println!();
 
     // Verdict (small, between OUTCOMES and NEXT) so failed steps are visible.
@@ -386,6 +528,33 @@ fn render_v2_sections(
     println!("source: {}", path.display());
 
     print!("{}", cta_footer());
+}
+
+fn evaluate_all_outcomes<'a>(
+    scenario: &'a Scenario,
+    results: &[StepResult],
+) -> Vec<(&'a ExpectedOutcome, OutcomeStatus)> {
+    // For princeps v2-eligible scenarios today, every step is a
+    // LendingDemo. When multiple steps exist, we evaluate each
+    // outcome against the LAST result (convention: outcomes describe
+    // end state). Multi-result scenarios that want per-step outcomes
+    // can land later.
+    let last_lending = results.iter().rev().find_map(|r| match r {
+        StepResult::LendingDemo(d) => Some(d),
+    });
+
+    scenario
+        .expected_outcomes
+        .iter()
+        .map(|outcome| {
+            let status = if let Some(d) = last_lending {
+                evaluate_lending_check(&outcome.check, d)
+            } else {
+                OutcomeStatus::Fail("no lending-demo result available".to_string())
+            };
+            (outcome, status)
+        })
+        .collect()
 }
 
 fn run_embedded_v1(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedReport> {
@@ -676,6 +845,7 @@ mod tests {
                     expect: None,
                 })
                 .collect(),
+            expected_outcomes: Vec::new(),
         }
     }
 
@@ -701,5 +871,119 @@ mod tests {
     fn is_v2_eligible_false_for_empty_scenario() {
         let s = make_scenario(&[]);
         assert!(!is_v2_eligible(&s));
+    }
+
+    /// Phase 3: expected_outcomes parsing + evaluation.
+
+    fn fake_result(siloed: i128, unified: i128) -> crate::LendingDemoResult {
+        crate::LendingDemoResult {
+            eth_crash_price: 90,
+            initial_collateral_usdc: 1000,
+            borrowed_eth_units: 5,
+            perp_position_size: 10,
+            perp_entry_mark: 100,
+            perp_margin_usdc: 50,
+            siloed_free_equity: siloed,
+            unified_free_equity: unified,
+        }
+    }
+
+    #[test]
+    fn evaluate_lending_check_verdict_pass() {
+        let r = fake_result(-140, 360);
+        let s = evaluate_lending_check(
+            &LendingCheck::SiloedVerdict("LIQUIDATABLE".to_string()),
+            &r,
+        );
+        assert!(matches!(s, OutcomeStatus::Pass));
+        let s = evaluate_lending_check(
+            &LendingCheck::UnifiedVerdict("HEALTHY".to_string()),
+            &r,
+        );
+        assert!(matches!(s, OutcomeStatus::Pass));
+    }
+
+    #[test]
+    fn evaluate_lending_check_verdict_fail() {
+        let r = fake_result(-140, 360);
+        let s = evaluate_lending_check(
+            &LendingCheck::UnifiedVerdict("LIQUIDATABLE".to_string()),
+            &r,
+        );
+        match s {
+            OutcomeStatus::Fail(why) => assert!(why.contains("HEALTHY")),
+            _ => panic!("expected Fail"),
+        }
+    }
+
+    #[test]
+    fn evaluate_lending_check_bounds() {
+        let r = fake_result(-140, 360);
+        assert!(matches!(
+            evaluate_lending_check(&LendingCheck::SiloedFreeMax(-1), &r),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_lending_check(&LendingCheck::SiloedFreeMax(-200), &r),
+            OutcomeStatus::Fail(_)
+        ));
+        assert!(matches!(
+            evaluate_lending_check(&LendingCheck::UnifiedFreeMin(0), &r),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_lending_check(&LendingCheck::UnifiedFreeMin(500), &r),
+            OutcomeStatus::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn scenario_with_expected_outcomes_round_trips() {
+        let json = r#"{
+            "name": "test",
+            "category": "stress",
+            "description": "test",
+            "headline": "test",
+            "steps": [
+                {"explanation": "step", "command": "princeps lending-demo --eth-crash-price 90"}
+            ],
+            "expected_outcomes": [
+                {
+                    "name": "u-healthy",
+                    "description": "unified stays HEALTHY",
+                    "check": {"unified_verdict": "HEALTHY"}
+                },
+                {
+                    "name": "siloed-neg",
+                    "description": "siloed free is negative",
+                    "check": {"siloed_free_max": -1}
+                }
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).expect("parse");
+        assert_eq!(s.expected_outcomes.len(), 2);
+        assert!(matches!(
+            s.expected_outcomes[0].check,
+            LendingCheck::UnifiedVerdict(_)
+        ));
+        assert!(matches!(
+            s.expected_outcomes[1].check,
+            LendingCheck::SiloedFreeMax(-1)
+        ));
+    }
+
+    #[test]
+    fn scenario_without_expected_outcomes_still_parses() {
+        let json = r#"{
+            "name": "test",
+            "category": "stress",
+            "description": "test",
+            "headline": "test",
+            "steps": [
+                {"explanation": "step", "command": "princeps lending-demo --eth-crash-price 90"}
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).expect("parse");
+        assert!(s.expected_outcomes.is_empty());
     }
 }
