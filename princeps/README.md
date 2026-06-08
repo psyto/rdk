@@ -28,6 +28,25 @@ Architecture detail: `docs/architecture.md`.
 
 ## Sandbox surface (start here)
 
+### Discover
+
+```bash
+# List the curated scenarios with their headlines.
+princeps scenario list
+
+# Inspect one scenario without running it.
+princeps scenario show cross-margin-survival
+
+# Get the step-by-step recipe of CLI invocations.
+# (v0 prints the steps; v1 will execute each step in-process and
+# render a headline + before/after delta. See bin/princeps/src/scenario.rs.)
+princeps scenario run cross-margin-survival
+```
+
+Three scenarios ship today: `cross-margin-survival` (the canonical prime broker thesis at the canonical crash depth), `cross-margin-fail` (negative control at deeper crash), `manual-lending-walkthrough` (hands-on lending CLI walkthrough).
+
+### Drive the underlying CLI directly
+
 ```bash
 # 1-second full lifecycle: deposit → borrow → ETH crash → cross-margin survives or doesn't.
 princeps lending-demo
@@ -61,13 +80,11 @@ Per `fabrknt/website/SANDBOX-PATTERN.md`, every Fabrknt sandbox must ship five e
 
 | Element | Status | Notes |
 |---|---|---|
-| (1) Pre-baked scenarios | partial | `lending-demo` is a strong one-shot scenario. `devnet-3.sh` adds multi-validator. 3 more named scenarios pending (cross-margin save, oracle stale halt, ADL cascade, insurance fund socialization). |
-| (2) Business-readable output | gap | `lending-demo` prints raw lifecycle but no headline. Needs `scenario` subcommand emitting headline + timeline + before/after. |
-| (3) Parameter dial | partial | Lending params via genesis config. LTV / liquidation penalty / oracle staleness need CLI-flag exposure. |
-| (4) Scenario replay | gap | No replay fixture format. Plan: mirror `openhl`'s `chain-history` JSON schema. |
-| (5) CTA | gap | No CTA in any surface. Needs footer on `scenario` and `lending-demo` output. |
-
-Implementation of these is tracked separately from this documentation pass.
+| (1) Pre-baked scenarios | **partial → present** | `scenarios/` directory with 3 scenarios (`cross-margin-survival`, `cross-margin-fail`, `manual-lending-walkthrough`). More to follow as oracle-stale and ADL-cascade behaviors get scripted. |
+| (2) Business-readable output | partial | `scenario list` / `show` / `run` produce ASCII tables and step summaries with headlines. `lending-demo`'s own output is still raw mechanics. v1 will wrap the runtime output in a headline + delta layer. |
+| (3) Parameter dial | partial | `lending-demo --eth-crash-price <N>` already exposes the canonical dial. Per-step parameter overrides on `scenario run` (margin bps, oracle staleness) land in v1. |
+| (4) Scenario replay | partial | Each scenario file is a deterministic step list — re-running yields the same result. Format does not yet capture mid-stream RPC observations; that lands when in-process execution is added in v1. |
+| (5) CTA | **done** | `scenario list` / `show` / `run` all render a three-option CTA footer (adopt engine / custom build / hosted access). |
 
 ## Operator surface
 

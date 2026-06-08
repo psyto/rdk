@@ -1,0 +1,13 @@
+{
+  "name": "cross-margin-fail",
+  "category": "lending-cross-margin",
+  "description": "Same setup as `cross-margin-survival` but with a much deeper crash: ETH drops from $100 to $50 (a 50% move). At this point even Alice's perp position's unrealized PnL is not enough to absorb the lending health hit. Unified margin breaks alongside siloed margin; the liquidation engine fires and the position is unwound. This is the negative control: it proves cross-margin doesn't make the system invulnerable, only better at netting risks within bounds.",
+  "headline": "A 50% ETH crash overwhelms even cross-margin; the liquidation engine fires.",
+  "steps": [
+    {
+      "explanation": "Same lending-demo flow, deeper crash. The CLI output should show unified margin moving to LIQUIDATABLE (or Underwater) instead of HEALTHY.",
+      "command": "princeps lending-demo --eth-crash-price 50",
+      "expect": "LIQUIDATABLE"
+    }
+  ]
+}

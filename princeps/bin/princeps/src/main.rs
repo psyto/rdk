@@ -43,6 +43,7 @@
 mod genesis;
 mod keystore;
 mod observability;
+mod scenario;
 mod socialize;
 mod validator_keygen;
 
@@ -369,6 +370,40 @@ enum Command {
         #[arg(long, default_value_t = false)]
         validator_keystore_passphrase_stdin: bool,
     },
+
+    /// Sandbox scenario surface — discover, inspect, and walk through
+    /// pre-baked prime-broker scenarios. See `scenarios/` and
+    /// `fabrknt/website/SANDBOX-PATTERN.md`.
+    Scenario {
+        #[command(subcommand)]
+        action: ScenarioAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScenarioAction {
+    /// List all available scenarios with their headlines.
+    List {
+        /// Directory containing scenario JSON files. Default: `scenarios/`
+        /// relative to the current working directory.
+        #[arg(long, default_value = "scenarios")]
+        dir: PathBuf,
+    },
+    /// Print one scenario's metadata, description, and step summary.
+    Show {
+        /// Scenario name (file stem without `.json`), e.g. `cross-margin-survival`.
+        name: String,
+        #[arg(long, default_value = "scenarios")]
+        dir: PathBuf,
+    },
+    /// Print the scenario's step-by-step recipe of CLI invocations.
+    /// (Embedded in-process execution lands in v1.)
+    Run {
+        /// Scenario name (file stem without `.json`).
+        name: String,
+        #[arg(long, default_value = "scenarios")]
+        dir: PathBuf,
+    },
 }
 
 /// Stage 24c — per-step lending subcommands. Operate on a file-based
@@ -635,6 +670,40 @@ fn main() -> eyre::Result<()> {
             validator_keystore_passphrase_file,
             validator_keystore_passphrase_stdin,
         )),
+        Command::Scenario { action } => run_scenario(action),
+    }
+}
+
+/// Dispatch for the `scenario` subcommand family. All paths are
+/// synchronous; no tokio runtime needed.
+fn run_scenario(action: ScenarioAction) -> eyre::Result<()> {
+    match action {
+        ScenarioAction::List { dir } => {
+            let paths = scenario::list_in(&dir)?;
+            let mut loaded: Vec<(PathBuf, scenario::Scenario)> = Vec::with_capacity(paths.len());
+            for path in paths {
+                match scenario::load_from_path(&path) {
+                    Ok(s) => loaded.push((path, s)),
+                    Err(e) => {
+                        eprintln!("warning: skipping {}: {e}", path.display());
+                    }
+                }
+            }
+            print!("{}", scenario::render_list(&loaded));
+            Ok(())
+        }
+        ScenarioAction::Show { name, dir } => {
+            let path = dir.join(format!("{name}.json"));
+            let s = scenario::load_from_path(&path)?;
+            print!("{}", scenario::render_show(&s, &path));
+            Ok(())
+        }
+        ScenarioAction::Run { name, dir } => {
+            let path = dir.join(format!("{name}.json"));
+            let s = scenario::load_from_path(&path)?;
+            print!("{}", scenario::render_run_v0(&s, &path));
+            Ok(())
+        }
     }
 }
 
