@@ -1,6 +1,6 @@
 {
   "name": "single-block-cascade",
-  "category": "liquidation-cascade",
+  "category": "stress",
   "description": "The same five-trader cascade as `cascade`, but every event lands in block 1 — deposits, resting sells, market buys all at once. The liquidation engine then runs once and clears everyone the oracle drop made vulnerable, in a single tick. Useful for comparing 'one-shot stress test' vs the staggered multi-block version: both produce the same final state, but the multi-block path lets you see the position-building phase that precedes the cascade.",
   "headline": "Same accounts as `cascade`, but the entire setup + crash fires on block 1.",
   "params": {

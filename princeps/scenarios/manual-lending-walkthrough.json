@@ -1,6 +1,6 @@
 {
   "name": "manual-lending-walkthrough",
-  "category": "lending-walkthrough",
+  "category": "walkthrough",
   "description": "Self-contained walkthrough of the hands-on `lending` subcommand family. Every step routes through a scenario-local state file (`.princeps-walkthrough-state.json` in the current directory) so residue from prior runs or from the default `$HOME/.princeps/lending-state.json` cannot leak in. Pair with `princeps lending list --state-file ./.princeps-walkthrough-state.json` between any two steps to inspect the position state. After the scenario, the file can be safely deleted: `rm -f ./.princeps-walkthrough-state.json`.",
   "headline": "Walk the lending sandbox by hand — deposit, borrow, check health, scan — against a clean per-scenario state file.",
   "steps": [

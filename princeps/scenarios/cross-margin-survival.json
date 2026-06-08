@@ -1,6 +1,6 @@
 {
   "name": "cross-margin-survival",
-  "category": "lending-cross-margin",
+  "category": "stress",
   "description": "Alice deposits USDC collateral, borrows ETH against it, and opens a perp position. The oracle then drops ETH from $100 to $90 — a 10% crash. In a siloed lending system (lending health checked alone) Alice would now be LIQUIDATABLE: her ETH debt is worth more in USDC terms and her collateral ratio crosses the maintenance threshold. Under princeps's unified portfolio margin (lending + perps in one pool), the unrealized PnL on her perp position absorbs the lending health hit; she ends the scenario HEALTHY. This is the core prime broker thesis: cross-asset risk netting that single-protocol systems cannot replicate.",
   "headline": "Cross-margin saves Alice from a 10% ETH crash: siloed-LIQUIDATABLE becomes unified-HEALTHY.",
   "steps": [
