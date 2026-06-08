@@ -1,0 +1,46 @@
+{
+  "name": "cascade",
+  "category": "liquidation-cascade",
+  "description": "Five traders open long perp positions over two blocks at mark 110. The oracle then reports an index price of 102 — an ~8% drop. Bob (low collateral) and Carol (high leverage) cross liquidation thresholds. The integration coordinator's per-block routine fires the cascade: oracle refresh → liquidation scan → ADL absorption → vault mark-to-market → funding settlement. Insurance fund absorbs the bad debt. Use this scenario to see what cross-margin under stress looks like, end to end.",
+  "headline": "ETH drops ~8% in one block. Bob is liquidated; Carol goes underwater; insurance fund absorbs the bad debt.",
+  "params": {
+    "rounds": 5,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 200,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 200},
+          {"account": 20, "amount": 90},
+          {"account": 30, "amount": 100},
+          {"account": 40, "amount": 300},
+          {"account": 50, "amount": 200}
+        ],
+        "trades": [
+          {"id": 1001, "account": 40, "side": "Sell", "qty": 50, "kind": "Limit", "price": 110},
+          {"id": 1002, "account": 50, "side": "Sell", "qty": 20, "kind": "Limit", "price": 110}
+        ]
+      },
+      {
+        "height": 2,
+        "trades": [
+          {"id": 1003, "account": 10, "side": "Buy", "qty": 10, "kind": "Market"},
+          {"id": 1004, "account": 20, "side": "Buy", "qty": 10, "kind": "Market"},
+          {"id": 1005, "account": 30, "side": "Buy", "qty": 30, "kind": "Market"},
+          {"id": 1006, "account": 30, "side": "Buy", "qty": 20, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 3,
+        "trades": [
+          {"id": 2001, "account": 1, "side": "Buy",  "qty": 1, "kind": "Limit", "price": 95},
+          {"id": 2002, "account": 2, "side": "Sell", "qty": 1, "kind": "Limit", "price": 97}
+        ]
+      }
+    ]
+  }
+}

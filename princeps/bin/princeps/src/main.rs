@@ -1,4 +1,7 @@
-//! princeps — Hyperliquid-shape L1 reference implementation.
+//! princeps — EVM Prime Broker Sandbox engine. A deterministic Reth+Malachite L1
+//! unifying lending + perps + (future) options under one shared risk engine.
+//! See `README.md` for the Fabrknt brand framing and `docs/architecture.md` for
+//! subsystem detail.
 //!
 //! Three subcommands:
 //!
@@ -78,7 +81,7 @@ use sha2::{Digest, Sha256};
 #[command(
     name = "princeps",
     version,
-    about = "Hyperliquid-shape L1 reference implementation",
+    about = "EVM Prime Broker Sandbox engine — explore cross-margin prime broker behavior on a Reth+Malachite L1",
     long_about = None
 )]
 struct Cli {
@@ -1271,7 +1274,7 @@ fn print_info() {
     let node = PrincepsNode::new(config);
 
     println!(
-        "princeps v{} (Hyperliquid-shape L1 reference)",
+        "princeps v{} (EVM Prime Broker Sandbox engine)",
         env!("CARGO_PKG_VERSION")
     );
     println!("config:");

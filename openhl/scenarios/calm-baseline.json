@@ -1,0 +1,39 @@
+{
+  "name": "calm-baseline",
+  "category": "baseline",
+  "description": "Two conservatively-margined traders open balanced positions at mark 100. No oracle drop, no liquidations, no insurance fund draw. Five rounds of consensus pass; funding settles each block but accounts stay flat-healthy. Useful as a control: if the cascade scenario shows your system breaking, the calm scenario should show it not breaking under benign conditions. Differences between the two are the engine's contribution.",
+  "headline": "Two balanced traders, oracle steady. Five rounds of funding accrual, zero liquidations.",
+  "params": {
+    "rounds": 5,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 200,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 1000},
+          {"account": 20, "amount": 1000}
+        ],
+        "trades": [
+          {"id": 1001, "account": 20, "side": "Sell", "qty": 10, "kind": "Limit", "price": 100}
+        ]
+      },
+      {
+        "height": 2,
+        "trades": [
+          {"id": 1002, "account": 10, "side": "Buy", "qty": 10, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 3,
+        "trades": [
+          {"id": 2001, "account": 1, "side": "Buy",  "qty": 1, "kind": "Limit", "price": 99},
+          {"id": 2002, "account": 2, "side": "Sell", "qty": 1, "kind": "Limit", "price": 101}
+        ]
+      }
+    ]
+  }
+}

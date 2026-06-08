@@ -5,8 +5,8 @@ Ready-made DeFi L1 stack: **Reth/REVM (execution) + Malachite (BFT consensus) + 
 A monorepo hosting:
 
 - **`crates/`** — the kit itself: reusable DeFi L1 primitives (CLOB, funding, vault, liquidation, clearing, oracle, types, codec) consumable by any Reth+Malachite-based L1.
-- **`openhl/`** — reference Perp DEX L1 (Hyperliquid-shape). Worked example for the rethlab DIY Perp track.
-- **`princeps/`** — DeFi prime broker L1 (lending → options → structured products → institutional rails). Production product.
+- **`openhl/`** — EVM Perp Sandbox engine. Reth+Malachite L1 that makes perp DEX behavior explorable. The engine behind Fabrknt's [EVM Perp Sandbox](https://fabrknt.com/evm-perp.html). See `openhl/README.md`.
+- **`princeps/`** — EVM Prime Broker Sandbox engine. Reth+Malachite L1 unifying lending + perps + (future) options under one shared risk engine. The engine behind Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/evm-prime-broker.html). See `princeps/README.md`.
 
 ## Why a kit
 

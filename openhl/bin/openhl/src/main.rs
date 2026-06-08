@@ -1,4 +1,6 @@
-//! openhl — Hyperliquid-shape L1 reference implementation.
+//! openhl — EVM Perp Sandbox engine. A deterministic Reth+Malachite L1 that
+//! makes perp DEX behavior explorable. See `README.md` for the Fabrknt brand
+//! framing and `docs/architecture.md` for subsystem detail.
 //!
 //! Three subcommands:
 //!
@@ -40,6 +42,7 @@
 mod chain_history;
 mod reader_contracts;
 mod rpc;
+mod scenario;
 mod seed_fixture;
 use crate::rpc::OpenHlInfoApiServer as _;
 
@@ -81,7 +84,7 @@ use sha2::{Digest, Sha256};
 #[command(
     name = "openhl",
     version,
-    about = "Hyperliquid-shape L1 reference implementation",
+    about = "EVM Perp Sandbox engine — explore perp DEX behavior on a Reth+Malachite L1",
     long_about = None
 )]
 struct Cli {
@@ -230,6 +233,44 @@ enum Command {
         #[arg(long, conflicts_with = "seed_fixture")]
         chain_history: Option<PathBuf>,
     },
+
+    /// Sandbox scenario surface — discover, inspect, and run pre-baked
+    /// scenarios that demonstrate perp DEX behavior under specific
+    /// conditions. See `scenarios/` and `fabrknt/website/SANDBOX-PATTERN.md`.
+    Scenario {
+        #[command(subcommand)]
+        action: ScenarioAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScenarioAction {
+    /// List all available scenarios with their headlines.
+    List {
+        /// Directory containing scenario JSON files. Default: `scenarios/`
+        /// relative to the current working directory.
+        #[arg(long, default_value = "scenarios")]
+        dir: PathBuf,
+    },
+    /// Print one scenario's metadata, parameters, and event summary.
+    Show {
+        /// Scenario name (file stem without `.json`), e.g. `cascade`.
+        name: String,
+        #[arg(long, default_value = "scenarios")]
+        dir: PathBuf,
+    },
+    /// Print the equivalent `reth-devnet` invocation to execute this
+    /// scenario. (Embedded in-CLI execution with headline + delta
+    /// rendering lands in v1.)
+    Run {
+        /// Scenario name (file stem without `.json`).
+        name: String,
+        #[arg(long, default_value = "scenarios")]
+        dir: PathBuf,
+        /// Override the default round count baked into the scenario.
+        #[arg(long)]
+        rounds: Option<u64>,
+    },
 }
 
 /// On-disk shape of `--validators <path>`. Stage 13j.
@@ -294,6 +335,40 @@ fn main() -> eyre::Result<()> {
             seed_fixture,
             chain_history,
         )),
+        Command::Scenario { action } => run_scenario(action),
+    }
+}
+
+/// Dispatch for the `scenario` subcommand family. All paths are
+/// synchronous; no tokio runtime needed.
+fn run_scenario(action: ScenarioAction) -> eyre::Result<()> {
+    match action {
+        ScenarioAction::List { dir } => {
+            let paths = scenario::list_in(&dir)?;
+            let mut loaded: Vec<(PathBuf, scenario::Scenario)> = Vec::with_capacity(paths.len());
+            for path in paths {
+                match scenario::load_from_path(&path) {
+                    Ok(s) => loaded.push((path, s)),
+                    Err(e) => {
+                        eprintln!("warning: skipping {}: {e}", path.display());
+                    }
+                }
+            }
+            print!("{}", scenario::render_list(&loaded));
+            Ok(())
+        }
+        ScenarioAction::Show { name, dir } => {
+            let path = dir.join(format!("{name}.json"));
+            let s = scenario::load_from_path(&path)?;
+            print!("{}", scenario::render_show(&s, &path));
+            Ok(())
+        }
+        ScenarioAction::Run { name, dir, rounds } => {
+            let path = dir.join(format!("{name}.json"));
+            let s = scenario::load_from_path(&path)?;
+            print!("{}", scenario::render_run_v0(&s, &path, rounds));
+            Ok(())
+        }
     }
 }
 
@@ -321,7 +396,7 @@ fn print_info() {
     let node = OpenHlNode::new(config);
 
     println!(
-        "openhl v{} (Hyperliquid-shape L1 reference)",
+        "openhl v{} (EVM Perp Sandbox engine)",
         env!("CARGO_PKG_VERSION")
     );
     println!("config:");
