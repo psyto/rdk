@@ -235,31 +235,43 @@ pub fn run_embedded(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedRe
             continue;
         }
 
-        // Naïve tokenization: split on whitespace. Existing scenarios
-        // never embed quoted-string args, but if that changes, swap
-        // to a `shell_words::split` parser.
-        let argv: Vec<&str> = trimmed.split_whitespace().collect();
-        let (program, args) = match argv.split_first() {
-            Some((p, a)) => (*p, a),
-            None => continue,
-        };
+        // Shell-metacharacter detection: steps that chain commands via
+        // `&&`, `||`, `;`, or pipes can't be naïvely whitespace-split
+        // — route those through `sh -c` with PATH augmented so
+        // `princeps` resolves to the current binary. Non-meta commands
+        // keep the direct-spawn path with princeps→current_exe rewrite.
+        let has_shell_metas = trimmed.contains("&&")
+            || trimmed.contains("||")
+            || trimmed.contains(';')
+            || trimmed.contains('|')
+            || trimmed.contains('>')
+            || trimmed.contains('<');
 
-        // Re-route princeps-prefixed commands to the current binary so
-        // we don't depend on PATH having a `princeps` installed.
-        // Anything else (spl-token, solana-keygen, ...) is spawned by
-        // name; missing binaries will surface as a spawn error.
-        let (cmd_name, cmd_args): (String, Vec<&str>) = if program == "princeps" {
-            (current_exe.to_string_lossy().into_owned(), args.to_vec())
+        let mut cmd = if has_shell_metas {
+            let mut c = Command::new("sh");
+            c.args(["-c", trimmed]);
+            if let Some(exe_dir) = current_exe.parent() {
+                let existing = std::env::var("PATH").unwrap_or_default();
+                let new_path = format!("{}:{existing}", exe_dir.display());
+                c.env("PATH", new_path);
+            }
+            c
         } else {
-            // For non-princeps commands we still try to spawn — many
-            // institutional scenarios reference spl-token / solana CLI
-            // tools. If the binary isn't installed, the spawn fails
-            // with a clear error and we mark the step failed.
-            (program.to_string(), args.to_vec())
+            let argv: Vec<&str> = trimmed.split_whitespace().collect();
+            let (program, args) = match argv.split_first() {
+                Some((p, a)) => (*p, a),
+                None => continue,
+            };
+            let (cmd_name, cmd_args): (String, Vec<&str>) = if program == "princeps" {
+                (current_exe.to_string_lossy().into_owned(), args.to_vec())
+            } else {
+                (program.to_string(), args.to_vec())
+            };
+            let mut c = Command::new(&cmd_name);
+            c.args(&cmd_args);
+            c
         };
 
-        let mut cmd = Command::new(&cmd_name);
-        cmd.args(&cmd_args);
         let status = cmd.status();
 
         match status {
@@ -282,9 +294,11 @@ pub fn run_embedded(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedRe
             Err(e) => {
                 println!();
                 println!("  ✗ step {} failed to spawn: {e}", i + 1);
-                println!(
-                    "    (program: {cmd_name:?}; for non-princeps commands the binary must be in PATH)"
-                );
+                if has_shell_metas {
+                    println!("    (routed via `sh -c` because the command contains shell metacharacters; check that `sh` is available)");
+                } else {
+                    println!("    (princeps prefixes auto-route to current_exe; other CLIs must be in PATH)");
+                }
                 report.failed += 1;
             }
         }
