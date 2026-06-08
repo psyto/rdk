@@ -734,28 +734,67 @@ fn tokio_rt() -> eyre::Result<tokio::runtime::Runtime> {
 /// Resolve the effective `--data-dir` path. If the user passed one
 /// explicitly we use it as-is; otherwise we default to
 /// `$HOME/.princeps/data`. Errors if neither is available (no HOME).
-/// Stage 24b: standalone cross-margin demo. Walks through Alice's
-/// canonical scenario against an in-memory `LiveRethEvmBridge` and
-/// proves the prime broker thesis: a position that would be liquidated
-/// under siloed margin checks stays open under unified portfolio margin.
-///
-/// Mirrors the `cross_margin_demo_scenario_e2e` test in
-/// `crates/evm/src/live_node.rs` but in binary form for any reader who
-/// clones the repo and runs `cargo run --bin princeps -- lending-demo`.
-fn run_lending_demo(eth_crash_price: u128) -> eyre::Result<()> {
+
+/// Structured outcome of the cross-margin demo. Captured by
+/// [`run_lending_demo_structured`] so callers (e.g., the scenario
+/// runner's v2 path) can render the result in their own shape rather
+/// than the printed one [`run_lending_demo`] emits. The four entry
+/// constants (collateral, borrow, perp size, perp margin) are echoed
+/// here so the runner can show them in the DELTA section without
+/// re-running the demo.
+#[derive(Debug, Clone)]
+pub struct LendingDemoResult {
+    /// `--eth-crash-price` value the demo was run at.
+    pub eth_crash_price: u128,
+    /// Entry: USDC collateral deposited at step 1.
+    pub initial_collateral_usdc: u128,
+    /// Entry: ETH borrowed at step 2 (units).
+    pub borrowed_eth_units: u128,
+    /// Entry: perp position opened at step 3 (contracts).
+    pub perp_position_size: i64,
+    /// Entry: perp entry mark price at step 3.
+    pub perp_entry_mark: u64,
+    /// Entry: USDC posted as perp margin at step 3.
+    pub perp_margin_usdc: u64,
+    /// Free equity considering ONLY the perp leg (siloed view) at the
+    /// crash mark. Negative → siloed-liquidatable.
+    pub siloed_free_equity: i128,
+    /// Free equity considering perp + lending together (unified
+    /// portfolio margin) at the crash mark. Negative → unified-
+    /// liquidatable.
+    pub unified_free_equity: i128,
+}
+
+impl LendingDemoResult {
+    /// Verdict string for the siloed view ("LIQUIDATABLE" / "HEALTHY").
+    #[must_use]
+    pub fn siloed_verdict(&self) -> &'static str {
+        if self.siloed_free_equity < 0 { "LIQUIDATABLE" } else { "HEALTHY" }
+    }
+
+    /// Verdict string for the unified view.
+    #[must_use]
+    pub fn unified_verdict(&self) -> &'static str {
+        if self.unified_free_equity < 0 { "LIQUIDATABLE" } else { "HEALTHY" }
+    }
+}
+
+/// Pure-compute version of [`run_lending_demo`]: drives the same
+/// scenario through an in-memory `LiveRethEvmBridge<()>` but returns
+/// the structured result instead of printing. Callers that want the
+/// printed form (e.g., the `princeps lending-demo` CLI subcommand)
+/// wrap this and print themselves.
+pub fn run_lending_demo_structured(eth_crash_price: u128) -> eyre::Result<LendingDemoResult> {
     use rdk_clearing::Account;
     use rdk_clob::AccountId;
     use princeps_lending::{AssetId, Bps, Index as LendingIndex, IrmParams, Market, MarketId};
     use std::collections::BTreeMap;
 
-    println!();
-    println!("=== Princeps — cross-margin demo (Stage 24b) ===");
-    println!();
-    println!("    Walking Alice through the canonical prime-broker scenario:");
-    println!("    deposit USDC → borrow ETH → open perp → market crash → check health.");
-    println!();
-    println!("    Run with --nocapture in tests, or `cargo run --bin princeps -- lending-demo`.");
-    println!();
+    const INITIAL_COLLATERAL: u128 = 1_000;
+    const BORROW_AMOUNT: u128 = 5;
+    const PERP_POSITION: i64 = 10;
+    const PERP_ENTRY: u64 = 100;
+    const PERP_MARGIN: u64 = 50;
 
     let chain_spec = dev_chain_spec();
     let bridge = LiveRethEvmBridge::new((), chain_spec);
@@ -783,64 +822,100 @@ fn run_lending_demo(eth_crash_price: u128) -> eyre::Result<()> {
 
     let alice = AccountId(42);
 
-    // Step 1: lending collateral
     bridge
-        .lending_deposit_collateral(alice, MarketId(0), 1_000)
+        .lending_deposit_collateral(alice, MarketId(0), INITIAL_COLLATERAL)
         .map_err(|e| eyre::eyre!("step 1 (deposit) failed: {e}"))?;
-    println!("[Step 1] Alice deposits 1000 USDC as lending collateral.");
 
-    // Step 2: borrow 5 ETH at entry price 100
     bridge
-        .lending_borrow(alice, MarketId(0), 5, 1, 100)
+        .lending_borrow(alice, MarketId(0), BORROW_AMOUNT, 1, PERP_ENTRY.into())
         .map_err(|e| eyre::eyre!("step 2 (borrow) failed: {e}"))?;
-    println!("[Step 2] Alice borrows 5 ETH at ETH=100 USDC (debt value = 500 USDC).");
 
-    // Step 3: open perp position
     bridge.with_accounts_mut(|map| {
         let mut a = Account::flat(alice);
-        a.position_size = PositionSize(10);
-        a.avg_entry = MarkPrice(100);
-        a.collateral = Notional(50);
+        a.position_size = PositionSize(PERP_POSITION);
+        a.avg_entry = MarkPrice(PERP_ENTRY);
+        // PERP_MARGIN is a small u64 constant (50); cast is lossless
+        // for the demo's hard-coded value but bounded for safety in case
+        // a future refactor parameterizes it.
+        a.collateral = Notional(i64::try_from(PERP_MARGIN).unwrap_or(i64::MAX));
         map.insert(alice, a);
     });
-    println!("[Step 3] Alice opens long perp: 10 contracts ETH @ entry 100, posts 50 USDC.");
 
-    // Step 4: market crash
-    println!();
-    println!(
-        "[Step 4] Market shock: ETH price drops from 100 → {eth_crash_price}."
-    );
-    println!();
-
-    // Build prices map for the crash state
     let mut crash_prices: BTreeMap<MarketId, (u128, u128)> = BTreeMap::new();
     crash_prices.insert(MarketId(0), (1, eth_crash_price));
     let empty_prices: BTreeMap<MarketId, (u128, u128)> = BTreeMap::new();
     let crash_mark = MarkPrice(u64::try_from(eth_crash_price).unwrap_or(u64::MAX));
 
-    let perp_only_free =
+    let siloed_free_equity =
         bridge.account_free_equity(alice, crash_mark, 1_000, &empty_prices);
-    let unified_free = bridge.account_free_equity(alice, crash_mark, 1_000, &crash_prices);
+    let unified_free_equity =
+        bridge.account_free_equity(alice, crash_mark, 1_000, &crash_prices);
+
+    Ok(LendingDemoResult {
+        eth_crash_price,
+        initial_collateral_usdc: INITIAL_COLLATERAL,
+        borrowed_eth_units: BORROW_AMOUNT,
+        perp_position_size: PERP_POSITION,
+        perp_entry_mark: PERP_ENTRY,
+        perp_margin_usdc: PERP_MARGIN,
+        siloed_free_equity,
+        unified_free_equity,
+    })
+}
+
+/// Stage 24b: standalone cross-margin demo. Walks through Alice's
+/// canonical scenario against an in-memory `LiveRethEvmBridge` and
+/// proves the prime broker thesis: a position that would be liquidated
+/// under siloed margin checks stays open under unified portfolio margin.
+///
+/// Now a thin printing wrapper around [`run_lending_demo_structured`].
+/// Mirrors the `cross_margin_demo_scenario_e2e` test in
+/// `crates/evm/src/live_node.rs` but in binary form for any reader who
+/// clones the repo and runs `cargo run --bin princeps -- lending-demo`.
+fn run_lending_demo(eth_crash_price: u128) -> eyre::Result<()> {
+    println!();
+    println!("=== Princeps — cross-margin demo (Stage 24b) ===");
+    println!();
+    println!("    Walking Alice through the canonical prime-broker scenario:");
+    println!("    deposit USDC → borrow ETH → open perp → market crash → check health.");
+    println!();
+    println!("    Run with --nocapture in tests, or `cargo run --bin princeps -- lending-demo`.");
+    println!();
+
+    let r = run_lending_demo_structured(eth_crash_price)?;
+
+    println!(
+        "[Step 1] Alice deposits {} USDC as lending collateral.",
+        r.initial_collateral_usdc
+    );
+    println!(
+        "[Step 2] Alice borrows {} ETH at ETH={} USDC (debt value = {} USDC).",
+        r.borrowed_eth_units,
+        r.perp_entry_mark,
+        r.borrowed_eth_units * u128::from(r.perp_entry_mark),
+    );
+    println!(
+        "[Step 3] Alice opens long perp: {} contracts ETH @ entry {}, posts {} USDC.",
+        r.perp_position_size, r.perp_entry_mark, r.perp_margin_usdc
+    );
+    println!();
+    println!(
+        "[Step 4] Market shock: ETH price drops from {} → {}.",
+        r.perp_entry_mark, r.eth_crash_price
+    );
+    println!();
 
     println!("            View                       Free equity       Verdict");
     println!("            ─────────────────────────  ───────────       ──────────────");
     println!(
         "            Siloed (perp only)         {:>11}       {}",
-        perp_only_free,
-        if perp_only_free < 0 {
-            "LIQUIDATABLE"
-        } else {
-            "healthy"
-        }
+        r.siloed_free_equity,
+        if r.siloed_free_equity < 0 { "LIQUIDATABLE" } else { "healthy" }
     );
     println!(
         "            Unified (perp + lending)   {:>11}       {}",
-        unified_free,
-        if unified_free < 0 {
-            "liquidatable"
-        } else {
-            "HEALTHY"
-        }
+        r.unified_free_equity,
+        if r.unified_free_equity < 0 { "liquidatable" } else { "HEALTHY" }
     );
     println!();
     println!("=> Same account that gets liquidated under Aave + dYdX silos");
@@ -848,16 +923,18 @@ fn run_lending_demo(eth_crash_price: u128) -> eyre::Result<()> {
     println!("=> This is the prime broker thesis in action.");
     println!();
 
-    if perp_only_free >= 0 {
+    if r.siloed_free_equity >= 0 {
         eprintln!(
-            "warning: at --eth-crash-price={eth_crash_price}, perp is NOT siloed-liquidatable. \
-             Default 90 produces the canonical demo result."
+            "warning: at --eth-crash-price={}, perp is NOT siloed-liquidatable. \
+             Default 90 produces the canonical demo result.",
+            r.eth_crash_price
         );
     }
-    if unified_free < 0 {
+    if r.unified_free_equity < 0 {
         eprintln!(
-            "warning: at --eth-crash-price={eth_crash_price}, unified portfolio is ALSO liquidatable. \
-             Try a smaller crash."
+            "warning: at --eth-crash-price={}, unified portfolio is ALSO liquidatable. \
+             Try a smaller crash.",
+            r.eth_crash_price
         );
     }
 

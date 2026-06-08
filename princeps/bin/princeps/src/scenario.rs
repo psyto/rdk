@@ -207,17 +207,188 @@ fn cta_footer() -> String {
     out
 }
 
-/// v1 embedded execution: print the headline, then walk each step,
-/// spawning `princeps`-prefixed commands as sub-processes that
-/// inherit stdio so their own output streams live. Non-princeps
-/// steps (comments, off-CLI hints) are skipped and printed as
-/// informational lines.
+/// Dispatch target for a step whose command can be served in-process
+/// (no sub-process spawn). v2 walks every step trying to parse one of
+/// these; if every step matches, the runner takes the v2 path and
+/// renders the structured HEADLINE / TIMELINE / DELTA / OUTCOMES /
+/// NEXT contract from `SANDBOX-PATTERN.md`. Otherwise the runner
+/// falls back to v1 (sub-process spawn with stdio inherit).
+#[derive(Debug, Clone, Copy)]
+pub enum InProcessTarget {
+    /// `princeps lending-demo --eth-crash-price <N>`
+    LendingDemo { eth_crash_price: u128 },
+}
+
+/// Try to parse a step's command into an in-process target. Returns
+/// `None` for commands that must still spawn a sub-process.
+pub fn try_parse_in_process(command: &str) -> Option<InProcessTarget> {
+    let trimmed = command.trim();
+    let prefix = "princeps lending-demo --eth-crash-price ";
+    if let Some(rest) = trimmed.strip_prefix(prefix) {
+        let n: u128 = rest.trim().parse().ok()?;
+        return Some(InProcessTarget::LendingDemo { eth_crash_price: n });
+    }
+    None
+}
+
+/// True iff every step in `scenario` can be served in-process. Drives
+/// the v2 vs v1 path selection.
+pub fn is_v2_eligible(scenario: &Scenario) -> bool {
+    !scenario.steps.is_empty()
+        && scenario
+            .steps
+            .iter()
+            .all(|s| try_parse_in_process(&s.command).is_some())
+}
+
+/// Result of running a single in-process step. Aggregated across all
+/// steps and consumed by the v2 renderer.
+#[derive(Debug, Clone)]
+enum StepResult {
+    LendingDemo(crate::LendingDemoResult),
+}
+
+/// Embedded execution. For v2-eligible scenarios (every step matches
+/// an [`InProcessTarget`]), dispatches in-process, captures structured
+/// results, and emits the 5-section v2 output contract. For other
+/// scenarios falls back to v1: spawn each step's command as a
+/// sub-process with stdio inherited.
 ///
-/// Returns the per-step status set. The caller is responsible for
-/// printing the scenario header (headline) and the trailing verdict
-/// + CTA; this function streams step output to the operator's
-/// terminal directly.
+/// Returns the per-step status set. The v1 path streams step output
+/// to the operator's terminal directly; the v2 path renders only the
+/// 5 sections and suppresses per-step stdout.
 pub fn run_embedded(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedReport> {
+    if is_v2_eligible(scenario) {
+        return run_embedded_v2(scenario, path);
+    }
+    run_embedded_v1(scenario, path)
+}
+
+fn run_embedded_v2(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedReport> {
+    println!(
+        "─── scenario: {} ────────────────────────────────────",
+        scenario.name
+    );
+    println!();
+
+    let mut results: Vec<StepResult> = Vec::with_capacity(scenario.steps.len());
+    let mut failed = 0usize;
+
+    for step in &scenario.steps {
+        let target = try_parse_in_process(&step.command)
+            .expect("v2-eligible scenario must have all-in-process steps");
+        match target {
+            InProcessTarget::LendingDemo { eth_crash_price } => {
+                match crate::run_lending_demo_structured(eth_crash_price) {
+                    Ok(r) => results.push(StepResult::LendingDemo(r)),
+                    Err(e) => {
+                        eprintln!("step '{}' failed: {e}", step.explanation);
+                        failed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let report = EmbeddedReport {
+        total_steps: scenario.steps.len(),
+        skipped: 0,
+        passed: results.len(),
+        failed,
+        expectations_unverified: 0,
+    };
+
+    render_v2_sections(scenario, path, &results, &report);
+
+    Ok(report)
+}
+
+fn render_v2_sections(
+    scenario: &Scenario,
+    path: &Path,
+    results: &[StepResult],
+    report: &EmbeddedReport,
+) {
+    // HEADLINE — for now echo scenario.headline (Phase 3 will verify it).
+    println!("HEADLINE: {}", scenario.headline);
+    println!();
+
+    // TIMELINE — derive from each captured result. For LendingDemo,
+    // each result contributes the 4-step demo sequence (deposit,
+    // borrow, perp open, market shock).
+    println!("TIMELINE:");
+    for (i, r) in results.iter().enumerate() {
+        match r {
+            StepResult::LendingDemo(d) => {
+                if results.len() > 1 {
+                    println!("  [scenario step {}]", i + 1);
+                }
+                println!(
+                    "    deposit  {} USDC as lending collateral",
+                    d.initial_collateral_usdc
+                );
+                println!(
+                    "    borrow   {} ETH at ETH={} USDC (debt = {} USDC)",
+                    d.borrowed_eth_units,
+                    d.perp_entry_mark,
+                    d.borrowed_eth_units * u128::from(d.perp_entry_mark)
+                );
+                println!(
+                    "    perp     long {} contracts @ entry {}, posts {} USDC margin",
+                    d.perp_position_size, d.perp_entry_mark, d.perp_margin_usdc
+                );
+                println!(
+                    "    shock    ETH price drops {} → {}",
+                    d.perp_entry_mark, d.eth_crash_price
+                );
+            }
+        }
+    }
+    println!();
+
+    // DELTA — before vs after, for the entities the scenario cares about.
+    println!("DELTA:");
+    println!("  view                       free equity   verdict");
+    println!("  -------------------------  -----------   ------------");
+    for r in results {
+        match r {
+            StepResult::LendingDemo(d) => {
+                println!(
+                    "  siloed (perp only)         {:>11}   {}",
+                    d.siloed_free_equity,
+                    d.siloed_verdict()
+                );
+                println!(
+                    "  unified (perp + lending)   {:>11}   {}",
+                    d.unified_free_equity,
+                    d.unified_verdict()
+                );
+            }
+        }
+    }
+    println!();
+
+    // OUTCOMES — v2 Phase 3 will parse expected_outcomes from JSON and
+    // verify them. Until then, emit a placeholder so the contract
+    // section is always present.
+    println!("OUTCOMES:");
+    println!("  (no expected_outcomes declared — Phase 3 will add JSON-driven verification)");
+    println!();
+
+    // Verdict (small, between OUTCOMES and NEXT) so failed steps are visible.
+    if report.failed > 0 {
+        println!(
+            "({} of {} step(s) failed during execution)",
+            report.failed, report.total_steps
+        );
+        println!();
+    }
+    println!("source: {}", path.display());
+
+    print!("{}", cta_footer());
+}
+
+fn run_embedded_v1(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedReport> {
     // Print scenario header up-front so the operator sees what they're
     // about to watch run.
     println!(
@@ -458,5 +629,77 @@ mod tests {
     fn metachar_does_not_match_plain_commands() {
         assert!(!has_shell_metacharacters("princeps lending-demo --eth-crash-price 90"));
         assert!(!has_shell_metacharacters("princeps lending init"));
+    }
+
+    /// v2 in-process dispatch tests.
+
+    #[test]
+    fn try_parse_in_process_matches_lending_demo() {
+        let t = try_parse_in_process("princeps lending-demo --eth-crash-price 90")
+            .expect("should match");
+        match t {
+            InProcessTarget::LendingDemo { eth_crash_price } => {
+                assert_eq!(eth_crash_price, 90);
+            }
+        }
+    }
+
+    #[test]
+    fn try_parse_in_process_handles_whitespace() {
+        let t = try_parse_in_process("  princeps lending-demo --eth-crash-price 42  ")
+            .expect("should match after trim");
+        match t {
+            InProcessTarget::LendingDemo { eth_crash_price } => assert_eq!(eth_crash_price, 42),
+        }
+    }
+
+    #[test]
+    fn try_parse_in_process_returns_none_for_other_commands() {
+        assert!(try_parse_in_process("princeps lending init").is_none());
+        assert!(try_parse_in_process("princeps info").is_none());
+        assert!(try_parse_in_process("princeps lending-demo").is_none()); // missing arg
+        assert!(try_parse_in_process("princeps lending-demo --eth-crash-price").is_none()); // missing value
+        assert!(try_parse_in_process("# comment").is_none());
+    }
+
+    fn make_scenario(commands: &[&str]) -> Scenario {
+        Scenario {
+            name: "test".to_string(),
+            category: "stress".to_string(),
+            description: "test".to_string(),
+            headline: "test".to_string(),
+            steps: commands
+                .iter()
+                .map(|c| ScenarioStep {
+                    explanation: "step".to_string(),
+                    command: (*c).to_string(),
+                    expect: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn is_v2_eligible_true_when_all_steps_in_process() {
+        let s = make_scenario(&[
+            "princeps lending-demo --eth-crash-price 90",
+            "princeps lending-demo --eth-crash-price 50",
+        ]);
+        assert!(is_v2_eligible(&s));
+    }
+
+    #[test]
+    fn is_v2_eligible_false_when_any_step_is_subprocess() {
+        let s = make_scenario(&[
+            "princeps lending-demo --eth-crash-price 90",
+            "princeps lending init", // not in-process-able
+        ]);
+        assert!(!is_v2_eligible(&s));
+    }
+
+    #[test]
+    fn is_v2_eligible_false_for_empty_scenario() {
+        let s = make_scenario(&[]);
+        assert!(!is_v2_eligible(&s));
     }
 }
