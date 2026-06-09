@@ -28,8 +28,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rdk_clearing::Account;
-use rdk_funding::MarkPrice;
-use rdk_liquidation::AccountSnapshot;
+use rdk_clob::Side;
+use rdk_funding::{MarkPrice, Notional, PositionSize};
+use rdk_liquidation::{AccountSnapshot, CloseOutcomeKind};
 use openhl_evm::LiveRethEvmBridge;
 use openhl_node::{OpenHlNode, OpenHlNodeConfig, TickInput};
 use reth_chainspec::ChainSpec;
@@ -335,6 +336,16 @@ pub fn run_embedded(scenario: &Scenario, dials: &DialOverrides) -> eyre::Result<
             vault_total_assets: coordinator.vault().total_assets().0,
         });
 
+        // Write-back loop: apply funding settlements + liquidation
+        // closes + ADL records back to the bridge's per-account state
+        // (mirrors `bin/openhl reth-devnet`'s commit-hook write-back).
+        // Without this, the scanner re-flags the same underwater
+        // accounts on every subsequent tick because their state never
+        // moves — the v1 scenario runner's signature limitation that
+        // this loop closes.
+        let (liq_solvent, liq_underwater, adl_records, funding_settlements) =
+            apply_tick_report_to_bridge(&bridge, &report);
+
         timeline.push(BlockSummary {
             height,
             trades_applied: counts.map_or(0, |c| c.0),
@@ -343,6 +354,10 @@ pub fn run_embedded(scenario: &Scenario, dials: &DialOverrides) -> eyre::Result<
             mark: mark.0,
             mark_source,
             liquidations: report.liquidation.records.len(),
+            liq_solvent,
+            liq_underwater,
+            adl_records,
+            funding_settlements,
             adl_fired: report.adl.is_some(),
             funding_fired: report.funding.is_some(),
         });
@@ -353,7 +368,82 @@ pub fn run_embedded(scenario: &Scenario, dials: &DialOverrides) -> eyre::Result<
     Ok(render_embedded_output(scenario, &initial, &final_accounts, &timeline))
 }
 
+/// Apply the post-tick `TickReport` back to the bridge's per-account
+/// state. Mirrors the commit-hook in `bin/openhl reth-devnet`:
+///   1. Funding settlements update collateral.
+///   2. Liquidation closes zero out the position + settle collateral.
+///   3. ADL records absorb position + credit PnL to the counterparty.
+///
+/// Returns `(liq_solvent, liq_underwater, adl_records, funding_settlements)`
+/// so the timeline can surface "what actually moved this block."
+fn apply_tick_report_to_bridge<P>(
+    bridge: &LiveRethEvmBridge<P>,
+    report: &openhl_node::TickReport,
+) -> (usize, usize, usize, usize) {
+    let mut liq_solvent = 0usize;
+    let mut liq_underwater = 0usize;
+    let mut adl_records = 0usize;
+    let mut funding_settlements = 0usize;
+
+    if let Some(ref ft) = report.funding {
+        bridge.with_accounts_mut(|accts| {
+            for settlement in &ft.settlements {
+                if let Some(acct) = accts.get_mut(&settlement.account) {
+                    let next = acct.collateral.0.saturating_add(settlement.delta.0);
+                    acct.collateral = Notional(next);
+                    funding_settlements += 1;
+                }
+            }
+        });
+    }
+
+    let has_liq = !report.liquidation.records.is_empty();
+    let has_adl = report
+        .adl
+        .as_ref()
+        .is_some_and(|a| !a.records.is_empty());
+    if has_liq || has_adl {
+        bridge.with_accounts_mut(|accts| {
+            for rec in &report.liquidation.records {
+                if let Some(acct) = accts.get_mut(&rec.close_order.account) {
+                    match rec.outcome {
+                        CloseOutcomeKind::Solvent(sc) => {
+                            acct.position_size = PositionSize(0);
+                            acct.collateral = Notional(sc.residual_to_account);
+                            liq_solvent += 1;
+                        }
+                        CloseOutcomeKind::Underwater(_) => {
+                            acct.position_size = PositionSize(0);
+                            acct.collateral = Notional(0);
+                            liq_underwater += 1;
+                        }
+                    }
+                }
+            }
+            if let Some(ref ar) = report.adl {
+                for rec in &ar.records {
+                    if let Some(acct) = accts.get_mut(&rec.close_order.account) {
+                        let prev_size = acct.position_size.0;
+                        let prev_coll = acct.collateral.0;
+                        let qty = i64::try_from(rec.close_order.qty.0).unwrap_or(i64::MAX);
+                        let new_size = match rec.close_order.side {
+                            Side::Sell => prev_size.saturating_sub(qty),
+                            Side::Buy => prev_size.saturating_add(qty),
+                        };
+                        acct.position_size = PositionSize(new_size);
+                        acct.collateral = Notional(prev_coll.saturating_add(rec.pnl_paid));
+                        adl_records += 1;
+                    }
+                }
+            }
+        });
+    }
+
+    (liq_solvent, liq_underwater, adl_records, funding_settlements)
+}
+
 /// Per-block summary captured during embedded execution.
+#[allow(dead_code)] // v2 Phase 4 detail fields kept for future renderer extension
 pub struct BlockSummary {
     height: u64,
     trades_applied: usize,
@@ -362,6 +452,17 @@ pub struct BlockSummary {
     mark: u64,
     mark_source: &'static str,
     liquidations: usize,
+    /// v2 Phase 4: liquidations whose close was solvent (collateral
+    /// >= shortfall). Account collateral is left at the residual; the
+    /// position is zeroed.
+    liq_solvent: usize,
+    /// v2 Phase 4: liquidations whose close went underwater (insurance
+    /// fund absorbs the shortfall). Account collateral zeroed.
+    liq_underwater: usize,
+    /// v2 Phase 4: ADL records applied to counterparty positions.
+    adl_records: usize,
+    /// v2 Phase 4: funding settlements applied to per-account collateral.
+    funding_settlements: usize,
     adl_fired: bool,
     funding_fired: bool,
 }
@@ -828,6 +929,10 @@ mod tests {
             mark,
             mark_source: "clob",
             liquidations,
+            liq_solvent: 0,
+            liq_underwater: 0,
+            adl_records: 0,
+            funding_settlements: 0,
             adl_fired: false,
             funding_fired: false,
         }]

@@ -54,6 +54,13 @@
       "check": {
         "liquidations_min": 2
       }
+    },
+    {
+      "name": "liquidations-bounded",
+      "description": "No more than 2 liquidations fire — write-back prevents re-flagging",
+      "check": {
+        "liquidations_max": 2
+      }
     }
   ]
 }

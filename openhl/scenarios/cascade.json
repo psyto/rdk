@@ -2,8 +2,8 @@
   "name": "cascade",
   "category": "stress",
   "compare_key": "mark-drop-stress",
-  "description": "Five traders open long perp positions over two blocks at entry price 110. At block 3 a small mark-book is placed (Buy 95 / Sell 97) — this drops the CLOB midpoint to 96, which is what the liquidation scanner reads as the mark. With longs entered at 110 and mark at 96, the maintenance margin breaks: the scanner flags multiple accounts each subsequent tick. Use this scenario to see what cross-margin under mark-drop stress looks like — the integration coordinator's per-block routine (oracle refresh → liquidation scan → ADL absorption → vault mark-to-market → funding settlement) fires every block once the mark drops. Note: oracle-driven cascades (where an oracle index price drives the mark, not the CLOB midpoint) need scenario JSON support for oracle observations and land in v2.",
-  "headline": "Mark drops from 110 to 96 (mark-book settles); the liquidation scanner flags accounts every tick from block 2 onward.",
+  "description": "Five traders open long perp positions over two blocks at entry price 110. At block 3 a small mark-book is placed (Buy 95 / Sell 97) — this drops the CLOB midpoint to 96, which is what the liquidation scanner reads as the mark. With longs entered at 110 and mark at 96, the maintenance margin breaks: at block 2 the scanner flags both underwater longs (Bob + Carol); the post-tick write-back loop zeroes their positions and absorbs the shortfall via the insurance fund + ADL (which forces the maker shorts to close at the haircut price). Subsequent ticks see no underwater accounts left to flag, so the cascade resolves in one tick. Use this scenario to see what cross-margin under mark-drop stress looks like, with the full close-loop (scan → liquidate → ADL counter-party) applied between blocks. Note: oracle-driven cascades (where an oracle index price drives the mark, not the CLOB midpoint) need scenario JSON support for oracle observations and land in v2.",
+  "headline": "Mark drops from 110 to 96 (mark-book settles); the scanner flags 2 underwater longs at block 2, the write-back loop closes them + their maker counterparties via ADL, cascade resolves in one tick.",
   "params": {
     "rounds": 5,
     "initial_margin_bps": 1000,
@@ -74,24 +74,45 @@
       }
     },
     {
-      "name": "liquidation-scan-fires",
-      "description": "The liquidation scanner flags at least 4 accounts across post-cascade blocks",
+      "name": "two-longs-liquidated",
+      "description": "The scanner flags the two underwater longs (Bob + Carol) at block 2; write-back closes them so subsequent ticks see nothing to flag",
       "check": {
-        "liquidations_min": 4
+        "liquidations_min": 2
       }
     },
     {
-      "name": "alice-long-10",
-      "description": "Alice (account 10) ends with a +10 long perp position",
+      "name": "liquidations-bounded",
+      "description": "No more than 2 liquidations fire across the run — write-back prevents re-flagging",
+      "check": {
+        "liquidations_max": 2
+      }
+    },
+    {
+      "name": "alice-survives",
+      "description": "Alice (account 10) survives with her +10 long unchanged (high collateral relative to her position)",
       "check": {
         "account_position": {"account": 10, "expected": 10}
       }
     },
     {
-      "name": "dave-short-50",
-      "description": "Dave (account 40) ends with a -50 short (the maker that sold into the longs)",
+      "name": "bob-closed",
+      "description": "Bob (account 20) ends with position zeroed by the liquidation close",
       "check": {
-        "account_position": {"account": 40, "expected": -50}
+        "account_position": {"account": 20, "expected": 0}
+      }
+    },
+    {
+      "name": "carol-closed",
+      "description": "Carol (account 30) ends with position zeroed by the liquidation close",
+      "check": {
+        "account_position": {"account": 30, "expected": 0}
+      }
+    },
+    {
+      "name": "maker-dave-adl-closed",
+      "description": "Dave (account 40) — the maker who sold into the underwater longs — is force-closed via ADL when the longs go underwater",
+      "check": {
+        "account_position": {"account": 40, "expected": 0}
       }
     }
   ]

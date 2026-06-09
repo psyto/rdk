@@ -1,8 +1,8 @@
 {
   "name": "threshold-margin",
   "category": "stress",
-  "description": "Three traders open long perp positions of varying leverage against the same maker quote at 110. At block 3 a mark-book lands at midpoint 100, putting all longs into unrealized loss. With the default 200bps maintenance margin, only the deepest-leverage account (account 30) crosses the threshold; the other two survive. Tighten the dial via `--maintenance-margin-bps 500` and a second account (account 20) also fires; loosen via `--maintenance-margin-bps 10` and only the unavoidable case (account 30) fires. The first openhl scenario whose outcome is sensitive to the margin-bps dial.",
-  "headline": "Mark settles to 100; at default 200bps maintenance only the deepest-leverage trader fires (account 30). Tighten via --maintenance-margin-bps to flip more accounts.",
+  "description": "Three traders open long perp positions of varying leverage against the same maker quote at 110. At block 3 a mark-book lands at midpoint 100, putting all longs into unrealized loss. With the default 200bps maintenance margin, only the deepest-leverage account (account 30) crosses the threshold and gets closed via the write-back loop; the other two survive. Tighten the dial via `--maintenance-margin-bps 500` and a second account (account 20) ALSO crosses; loosen via `--maintenance-margin-bps 10` and only the unavoidable case (account 30) fires. The first openhl scenario whose outcome is sensitive to the margin-bps dial.",
+  "headline": "Mark settles to 100; at default 200bps maintenance only the deepest-leverage trader (account 30) is liquidated. Tighten via --maintenance-margin-bps to flip more accounts.",
   "params": {
     "rounds": 5,
     "initial_margin_bps": 1000,
@@ -70,24 +70,38 @@
       }
     },
     {
-      "name": "liquidation-fires",
-      "description": "At least one liquidation scan-hit per post-cascade tick (account 30 stays flagged)",
+      "name": "one-liquidation",
+      "description": "At default 200bps maintenance exactly one liquidation fires (account 30) — write-back closes it; subsequent ticks see no underwater accounts",
       "check": {
-        "liquidations_min": 3
+        "liquidations_min": 1
       }
     },
     {
-      "name": "deepest-leverage-position",
-      "description": "Account 30 ends with the +20 long position that triggers liquidation",
+      "name": "liquidations-bounded",
+      "description": "No more than 1 liquidation fires under default params (the other two buyers survive)",
       "check": {
-        "account_position": {"account": 30, "expected": 20}
+        "liquidations_max": 1
       }
     },
     {
-      "name": "maker-short-30",
-      "description": "Maker (account 100) ends with the -30 short matching the 3 buyers' combined long",
+      "name": "deepest-leverage-closed",
+      "description": "Account 30 ends with position zeroed by the liquidation close (no longer the +20 long it opened with)",
       "check": {
-        "account_position": {"account": 100, "expected": -30}
+        "account_position": {"account": 30, "expected": 0}
+      }
+    },
+    {
+      "name": "maker-adl-closed",
+      "description": "Maker (account 100) is force-closed via ADL when account 30 goes underwater — position drops from -30 to 0",
+      "check": {
+        "account_position": {"account": 100, "expected": 0}
+      }
+    },
+    {
+      "name": "alice-survives",
+      "description": "Alice (account 10) survives with her +5 long unchanged (her 500 collateral easily covers maintenance)",
+      "check": {
+        "account_position": {"account": 10, "expected": 5}
       }
     }
   ]
