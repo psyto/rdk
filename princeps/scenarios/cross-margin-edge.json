@@ -1,0 +1,51 @@
+{
+  "name": "cross-margin-edge",
+  "category": "stress",
+  "compare_key": "mark-drop-stress",
+  "description": "Mid-range stress point between the canonical 10% crash (`cross-margin-survival`) and the deep 50% crash (`cross-margin-fail`). With ETH at 95 (5% crash), the demo's fixed perp position is already deeply siloed-LIQUIDATABLE — the perp's initial-margin requirement bites well before mark-vs-entry breakeven. Unified margin still has 380 USDC headroom, demonstrating that the netting envelope holds even with the perp leg under-water. Useful for showing how an IM-driven liquidation gate fires earlier than a naïve P&L formula suggests, and how cross-margin nets that early.\n\nTip: pass `--eth-crash-price <N>` on `scenario run` to dial through other crash depths without editing this JSON — the v2 path applies the override before invoking the in-process demo.",
+  "headline": "At ETH = 95 (5% crash), the IM-driven gate already marks the perp leg liquidatable; unified margin still has ~380 USDC headroom.",
+  "steps": [
+    {
+      "explanation": "Run lending-demo at the mid-stress crash point. Output shows siloed already deeply negative because of the IM check; unified still positive thanks to lending collateral netting against the perp loss.",
+      "command": "princeps lending-demo --eth-crash-price 95",
+      "expect": "HEALTHY"
+    }
+  ],
+  "expected_outcomes": [
+    {
+      "name": "siloed-liquidatable",
+      "description": "Siloed view marks Alice LIQUIDATABLE under the IM check",
+      "check": {
+        "siloed_verdict": "LIQUIDATABLE"
+      }
+    },
+    {
+      "name": "siloed-moderate-loss",
+      "description": "Siloed free equity is in the moderate-loss range (-100 to -50)",
+      "check": {
+        "siloed_free_max": -50
+      }
+    },
+    {
+      "name": "siloed-not-deep-loss",
+      "description": "Siloed loss is not as deep as the 10% crash (better than -140)",
+      "check": {
+        "siloed_free_min": -100
+      }
+    },
+    {
+      "name": "unified-healthy",
+      "description": "Unified margin keeps Alice HEALTHY through the netting envelope",
+      "check": {
+        "unified_verdict": "HEALTHY"
+      }
+    },
+    {
+      "name": "unified-free-headroom",
+      "description": "Unified free equity has at least 300 USDC of headroom",
+      "check": {
+        "unified_free_min": 300
+      }
+    }
+  ]
+}

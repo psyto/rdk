@@ -43,6 +43,14 @@ openhl scenario run cascade --dry-run
 
 Three scenarios ship today: `cascade` (5-trader multi-block liquidation cascade — fires 8 liquidation scan-hits in v1), `single-block-cascade` (same cascade compressed into one block), `calm-baseline` (control: two balanced traders, no liquidations).
 
+Dial flags on `scenario run` (override the values baked into the scenario JSON's `params` block):
+- `--rounds <N>` — block count
+- `--initial-margin-bps <N>` — initial margin (default 1000)
+- `--maintenance-margin-bps <N>` — maintenance margin (default 200)
+- `--liquidation-fee-bps <N>` — liquidation fee (default 150)
+
+Lets a buyer ask "what changes if maintenance margin tightens from 2% to 5%?" without editing the scenario JSON.
+
 ### Raw devnet surfaces (for deeper inspection)
 
 ```bash

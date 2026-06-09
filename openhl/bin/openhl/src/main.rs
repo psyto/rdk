@@ -263,6 +263,15 @@ enum ScenarioAction {
     /// timeline + before/after account delta. Pass `--dry-run` to fall
     /// back to v0 behavior (print the equivalent `reth-devnet`
     /// invocation without executing).
+    ///
+    /// v2 dial flags (override the values baked into the scenario JSON):
+    ///   --rounds <N>                   Block count to drive.
+    ///   --initial-margin-bps <N>       Initial margin (default 1000).
+    ///   --maintenance-margin-bps <N>   Maintenance margin (default 200).
+    ///   --liquidation-fee-bps <N>      Liquidation fee (default 150).
+    ///
+    /// Lets a buyer ask "what changes if maintenance margin tightens
+    /// from 2% to 5%?" without editing the scenario JSON.
     Run {
         /// Scenario name (file stem without `.json`).
         name: String,
@@ -271,6 +280,15 @@ enum ScenarioAction {
         /// Override the default round count baked into the scenario.
         #[arg(long)]
         rounds: Option<u64>,
+        /// v2 dial: override initial margin in bps.
+        #[arg(long)]
+        initial_margin_bps: Option<u32>,
+        /// v2 dial: override maintenance margin in bps.
+        #[arg(long)]
+        maintenance_margin_bps: Option<u32>,
+        /// v2 dial: override liquidation fee in bps.
+        #[arg(long)]
+        liquidation_fee_bps: Option<u32>,
         /// Skip embedded execution; print the equivalent reth-devnet
         /// invocation instead. Use when you want the long-running
         /// production-shape node (real Reth + Malachite + JSON-RPC)
@@ -370,13 +388,27 @@ fn run_scenario(action: ScenarioAction) -> eyre::Result<()> {
             print!("{}", scenario::render_show(&s, &path));
             Ok(())
         }
-        ScenarioAction::Run { name, dir, rounds, dry_run } => {
+        ScenarioAction::Run {
+            name,
+            dir,
+            rounds,
+            initial_margin_bps,
+            maintenance_margin_bps,
+            liquidation_fee_bps,
+            dry_run,
+        } => {
             let path = dir.join(format!("{name}.json"));
             let s = scenario::load_from_path(&path)?;
             if dry_run {
                 print!("{}", scenario::render_run_v0(&s, &path, rounds));
             } else {
-                let out = scenario::run_embedded(&s, rounds)?;
+                let dials = scenario::DialOverrides {
+                    rounds,
+                    initial_margin_bps,
+                    maintenance_margin_bps,
+                    liquidation_fee_bps,
+                };
+                let out = scenario::run_embedded(&s, &dials)?;
                 print!("{}", out);
             }
             Ok(())

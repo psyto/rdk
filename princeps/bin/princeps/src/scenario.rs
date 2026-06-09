@@ -359,27 +359,55 @@ enum StepResult {
     LendingDemo(crate::LendingDemoResult),
 }
 
+/// Per-run dial overrides supplied by the CLI. Each field is optional;
+/// `None` means "use the value baked into the scenario JSON". Dials
+/// only affect v2-eligible scenarios — v1 sub-process scenarios pass
+/// their commands through unchanged and so cannot be retargeted from
+/// here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DialOverrides {
+    /// Override the `--eth-crash-price` argument on lending-demo
+    /// in-process targets.
+    pub eth_crash_price: Option<u128>,
+}
+
 /// Embedded execution. For v2-eligible scenarios (every step matches
-/// an [`InProcessTarget`]), dispatches in-process, captures structured
-/// results, and emits the 5-section v2 output contract. For other
-/// scenarios falls back to v1: spawn each step's command as a
-/// sub-process with stdio inherited.
+/// an [`InProcessTarget`]), dispatches in-process with optional
+/// [`DialOverrides`] applied, captures structured results, and emits
+/// the 5-section v2 output contract. For other scenarios falls back
+/// to v1: spawn each step's command as a sub-process with stdio
+/// inherited.
 ///
 /// Returns the per-step status set. The v1 path streams step output
 /// to the operator's terminal directly; the v2 path renders only the
 /// 5 sections and suppresses per-step stdout.
-pub fn run_embedded(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedReport> {
+pub fn run_embedded(
+    scenario: &Scenario,
+    path: &Path,
+    dials: &DialOverrides,
+) -> eyre::Result<EmbeddedReport> {
     if is_v2_eligible(scenario) {
-        return run_embedded_v2(scenario, path);
+        return run_embedded_v2(scenario, path, dials);
     }
     run_embedded_v1(scenario, path)
 }
 
-fn run_embedded_v2(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedReport> {
+fn run_embedded_v2(
+    scenario: &Scenario,
+    path: &Path,
+    dials: &DialOverrides,
+) -> eyre::Result<EmbeddedReport> {
     println!(
         "─── scenario: {} ────────────────────────────────────",
         scenario.name
     );
+    if dials.eth_crash_price.is_some() {
+        println!();
+        println!("DIAL OVERRIDES (from --eth-crash-price flag):");
+        if let Some(p) = dials.eth_crash_price {
+            println!("    eth_crash_price : {p}");
+        }
+    }
     println!();
 
     let mut results: Vec<StepResult> = Vec::with_capacity(scenario.steps.len());
@@ -390,7 +418,10 @@ fn run_embedded_v2(scenario: &Scenario, path: &Path) -> eyre::Result<EmbeddedRep
             .expect("v2-eligible scenario must have all-in-process steps");
         match target {
             InProcessTarget::LendingDemo { eth_crash_price } => {
-                match crate::run_lending_demo_structured(eth_crash_price) {
+                // Apply dial override if present; otherwise use the
+                // JSON-baked value.
+                let effective_price = dials.eth_crash_price.unwrap_or(eth_crash_price);
+                match crate::run_lending_demo_structured(effective_price) {
                     Ok(r) => results.push(StepResult::LendingDemo(r)),
                     Err(e) => {
                         eprintln!("step '{}' failed: {e}", step.explanation);

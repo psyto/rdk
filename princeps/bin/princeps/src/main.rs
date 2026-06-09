@@ -400,6 +400,14 @@ enum ScenarioAction {
     /// sub-process so each step's own output streams live. Pass
     /// `--dry-run` to fall back to v0 behavior (print the step list
     /// without executing).
+    ///
+    /// v2 dial flags (only effective for v2-eligible scenarios whose
+    /// in-process target accepts the override; ignored otherwise):
+    ///   --eth-crash-price <N>   Override the lending-demo crash price
+    ///                           (princeps lending-demo --eth-crash-price <N>
+    ///                            steps). Lets a buyer ask "what changes
+    ///                            if the crash were 80 instead of 90?"
+    ///                            without editing the scenario JSON.
     Run {
         /// Scenario name (file stem without `.json`).
         name: String,
@@ -408,6 +416,11 @@ enum ScenarioAction {
         /// Skip embedded execution; print only the step list.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        /// v2 dial: override the eth-crash-price baked into lending-demo
+        /// steps. Affects v2-eligible scenarios only; ignored for v1
+        /// sub-process scenarios.
+        #[arg(long)]
+        eth_crash_price: Option<u128>,
     },
 }
 
@@ -703,14 +716,15 @@ fn run_scenario(action: ScenarioAction) -> eyre::Result<()> {
             print!("{}", scenario::render_show(&s, &path));
             Ok(())
         }
-        ScenarioAction::Run { name, dir, dry_run } => {
+        ScenarioAction::Run { name, dir, dry_run, eth_crash_price } => {
             let path = dir.join(format!("{name}.json"));
             let s = scenario::load_from_path(&path)?;
             if dry_run {
                 print!("{}", scenario::render_run_v0(&s, &path));
                 Ok(())
             } else {
-                let report = scenario::run_embedded(&s, &path)?;
+                let dials = scenario::DialOverrides { eth_crash_price };
+                let report = scenario::run_embedded(&s, &path, &dials)?;
                 if report.failed > 0 {
                     Err(eyre::eyre!(
                         "{} step(s) failed during scenario run",

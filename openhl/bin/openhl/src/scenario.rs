@@ -238,8 +238,21 @@ pub fn render_show(scenario: &Scenario, path: &Path) -> String {
     out
 }
 
+/// Per-run dial overrides supplied by the CLI. Each field is optional;
+/// `None` means "use the value baked into the scenario JSON's `params`
+/// block".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DialOverrides {
+    pub rounds: Option<u64>,
+    pub initial_margin_bps: Option<u32>,
+    pub maintenance_margin_bps: Option<u32>,
+    pub liquidation_fee_bps: Option<u32>,
+}
+
 /// v1 embedded execution: actually run the scenario in-process and
-/// render the observed state.
+/// render the observed state. CLI [`DialOverrides`] take precedence
+/// over scenario JSON `params`, which in turn take precedence over
+/// the engine's compiled defaults.
 ///
 /// Constructs a `LiveRethEvmBridge<()>` (no Reth boot), applies the
 /// scenario's per-block trades and deposits via [`ChainHistoryApplier`],
@@ -253,16 +266,17 @@ pub fn render_show(scenario: &Scenario, path: &Path) -> String {
 /// "Bob liquidated when oracle drops to 102") are reported as
 /// "curator claim" alongside the observed state. Oracle drive in the
 /// JSON format lands in v2.
-pub fn run_embedded(scenario: &Scenario, rounds_override: Option<u64>) -> eyre::Result<String> {
-    // Build coordinator config with scenario param overrides.
+pub fn run_embedded(scenario: &Scenario, dials: &DialOverrides) -> eyre::Result<String> {
+    // Build coordinator config: CLI dials take precedence over JSON
+    // params over compiled defaults.
     let mut config = OpenHlNodeConfig::hyperliquid_default();
-    if let Some(im) = scenario.params.initial_margin_bps {
+    if let Some(im) = dials.initial_margin_bps.or(scenario.params.initial_margin_bps) {
         config.liquidation_params.initial_margin_bps = im;
     }
-    if let Some(mm) = scenario.params.maintenance_margin_bps {
+    if let Some(mm) = dials.maintenance_margin_bps.or(scenario.params.maintenance_margin_bps) {
         config.liquidation_params.maintenance_margin_bps = mm;
     }
-    if let Some(lf) = scenario.params.liquidation_fee_bps {
+    if let Some(lf) = dials.liquidation_fee_bps.or(scenario.params.liquidation_fee_bps) {
         config.liquidation_params.liquidation_fee_bps = lf;
     }
     let mut coordinator = OpenHlNode::new(config);
@@ -279,7 +293,8 @@ pub fn run_embedded(scenario: &Scenario, rounds_override: Option<u64>) -> eyre::
     let initial = bridge.accounts_snapshot();
 
     let max_height = applier.heights().iter().max().copied().unwrap_or(0);
-    let rounds = rounds_override
+    let rounds = dials
+        .rounds
         .or(scenario.params.rounds)
         .unwrap_or(max_height.saturating_add(2))
         .max(max_height);
@@ -753,7 +768,7 @@ mod tests {
     #[test]
     fn run_embedded_executes_and_renders_timeline() {
         let s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
-        let out = run_embedded(&s, None).expect("embedded run ok");
+        let out = run_embedded(&s, &DialOverrides::default()).expect("embedded run ok");
         // minimal fixture has no expected_outcomes → unverified badge
         assert!(out.contains("HEADLINE (unverified):"));
         assert!(out.contains("TIMELINE (per-block)"));
@@ -769,7 +784,7 @@ mod tests {
         // override and no rounds in params (the minimal fixture has
         // params.rounds = Some(5)), should run 5 blocks.
         let s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
-        let out = run_embedded(&s, None).expect("embedded run ok");
+        let out = run_embedded(&s, &DialOverrides::default()).expect("embedded run ok");
         // Five rows of timeline output (heights 1..=5).
         let timeline_rows = out.matches("       1 ").count()
             + out.matches("       2 ").count()
@@ -782,7 +797,7 @@ mod tests {
     #[test]
     fn run_embedded_creates_account_from_deposit() {
         let s: Scenario = serde_json::from_str(minimal_scenario_json()).unwrap();
-        let out = run_embedded(&s, None).expect("embedded run ok");
+        let out = run_embedded(&s, &DialOverrides::default()).expect("embedded run ok");
         // Minimal fixture deposits 1000 to account 10.
         assert!(out.contains("(initial account count: 0, final account count: 1)"));
         assert!(out.contains("      10"));
@@ -938,7 +953,7 @@ mod tests {
                 expected: 1000,
             },
         }];
-        let out = run_embedded(&s, None).expect("ok");
+        let out = run_embedded(&s, &DialOverrides::default()).expect("ok");
         assert!(out.contains("HEADLINE ✓:"), "expected ✓ badge; got:\n{out}");
         assert!(out.contains("1 of 1 outcome(s) verified."));
     }
@@ -951,7 +966,7 @@ mod tests {
             description: "deliberately fails".to_string(),
             check: OpenHlCheck::FillsMin(9999),
         }];
-        let out = run_embedded(&s, None).expect("ok");
+        let out = run_embedded(&s, &DialOverrides::default()).expect("ok");
         assert!(out.contains("HEADLINE ⚠:"), "expected ⚠ badge; got:\n{out}");
     }
 }
