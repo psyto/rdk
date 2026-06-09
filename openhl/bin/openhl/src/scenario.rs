@@ -96,6 +96,10 @@ pub enum OpenHlCheck {
     AccountCollateral { account: u64, expected: i64 },
     /// Assert a specific account's final position size equals `expected`.
     AccountPosition { account: u64, expected: i64 },
+    /// Assert a specific account's final avg_entry equals `expected`.
+    /// Useful for verifying the clearing layer's VWAP computation
+    /// across multiple fills.
+    AccountAvgEntry { account: u64, expected: u64 },
 }
 
 /// Per-outcome evaluation status used in the OUTCOMES section.
@@ -453,6 +457,16 @@ pub fn evaluate_openhl_check(
                 Some(a) => OutcomeStatus::Fail(format!(
                     "account {account} position = {} (expected {expected})",
                     a.position_size.0
+                )),
+                None => OutcomeStatus::Fail(format!("account {account} not in final state")),
+            }
+        }
+        OpenHlCheck::AccountAvgEntry { account, expected } => {
+            match final_accounts.iter().find(|a| a.account.0 == *account) {
+                Some(a) if a.avg_entry.0 == *expected => OutcomeStatus::Pass,
+                Some(a) => OutcomeStatus::Fail(format!(
+                    "account {account} avg_entry = {} (expected {expected})",
+                    a.avg_entry.0
                 )),
                 None => OutcomeStatus::Fail(format!("account {account} not in final state")),
             }

@@ -1,0 +1,94 @@
+{
+  "name": "threshold-margin",
+  "category": "stress",
+  "description": "Three traders open long perp positions of varying leverage against the same maker quote at 110. At block 3 a mark-book lands at midpoint 100, putting all longs into unrealized loss. With the default 200bps maintenance margin, only the deepest-leverage account (account 30) crosses the threshold; the other two survive. Tighten the dial via `--maintenance-margin-bps 500` and a second account (account 20) also fires; loosen via `--maintenance-margin-bps 10` and only the unavoidable case (account 30) fires. The first openhl scenario whose outcome is sensitive to the margin-bps dial.",
+  "headline": "Mark settles to 100; at default 200bps maintenance only the deepest-leverage trader fires (account 30). Tighten via --maintenance-margin-bps to flip more accounts.",
+  "params": {
+    "rounds": 5,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 200,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 500},
+          {"account": 20, "amount": 60},
+          {"account": 30, "amount": 50},
+          {"account": 100, "amount": 1000}
+        ],
+        "trades": [
+          {"id": 3001, "account": 100, "side": "Sell", "qty": 30, "kind": "Limit", "price": 110}
+        ]
+      },
+      {
+        "height": 2,
+        "trades": [
+          {"id": 3002, "account": 10, "side": "Buy", "qty": 5,  "kind": "Market"},
+          {"id": 3003, "account": 20, "side": "Buy", "qty": 5,  "kind": "Market"},
+          {"id": 3004, "account": 30, "side": "Buy", "qty": 20, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 3,
+        "trades": [
+          {"id": 3005, "account": 1, "side": "Buy",  "qty": 1, "kind": "Limit", "price": 99},
+          {"id": 3006, "account": 2, "side": "Sell", "qty": 1, "kind": "Limit", "price": 101}
+        ]
+      }
+    ]
+  },
+  "expected_outcomes": [
+    {
+      "name": "four-accounts-created",
+      "description": "Four accounts exist after trading (3 buyers + 1 maker)",
+      "check": {
+        "final_account_count": 4
+      }
+    },
+    {
+      "name": "three-fills",
+      "description": "Exactly three fills (the three market buys cross the single maker quote)",
+      "check": {
+        "fills_min": 3
+      }
+    },
+    {
+      "name": "fills-bounded",
+      "description": "No surprise fills beyond the three buys",
+      "check": {
+        "fills_max": 3
+      }
+    },
+    {
+      "name": "mark-settles-to-100",
+      "description": "Mark settles at 100 once the block-3 mark-book lands (Buy 99 / Sell 101 → midpoint 100)",
+      "check": {
+        "final_mark_max": 100
+      }
+    },
+    {
+      "name": "liquidation-fires",
+      "description": "At least one liquidation scan-hit per post-cascade tick (account 30 stays flagged)",
+      "check": {
+        "liquidations_min": 3
+      }
+    },
+    {
+      "name": "deepest-leverage-position",
+      "description": "Account 30 ends with the +20 long position that triggers liquidation",
+      "check": {
+        "account_position": {"account": 30, "expected": 20}
+      }
+    },
+    {
+      "name": "maker-short-30",
+      "description": "Maker (account 100) ends with the -30 short matching the 3 buyers' combined long",
+      "check": {
+        "account_position": {"account": 100, "expected": -30}
+      }
+    }
+  ]
+}

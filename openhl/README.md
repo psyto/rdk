@@ -41,7 +41,12 @@ openhl scenario run cascade
 openhl scenario run cascade --dry-run
 ```
 
-Three scenarios ship today: `cascade` (5-trader multi-block liquidation cascade — fires 8 liquidation scan-hits in v1), `single-block-cascade` (same cascade compressed into one block), `calm-baseline` (control: two balanced traders, no liquidations).
+Five scenarios ship today:
+- **`cascade`** (stress) — 5-trader multi-block liquidation cascade; 7 outcomes ✓.
+- **`single-block-cascade`** (stress) — same cascade compressed into one block; 3 outcomes ✓.
+- **`threshold-margin`** (stress) — three traders at varying leverage; outcomes are sensitive to the `--maintenance-margin-bps` dial (default fires 1 acct/block, 500bps fires 2/block, 10bps fires 1/block); 7 outcomes ✓.
+- **`position-buildup`** (walkthrough) — two market buys at different prices, demonstrates clearing-layer VWAP avg_entry computation; 8 outcomes ✓.
+- **`calm-baseline`** (baseline) — two balanced traders, no events; 4 outcomes ✓.
 
 Dial flags on `scenario run` (override the values baked into the scenario JSON's `params` block):
 - `--rounds <N>` — block count

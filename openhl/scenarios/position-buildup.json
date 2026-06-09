@@ -1,0 +1,109 @@
+{
+  "name": "position-buildup",
+  "category": "walkthrough",
+  "description": "A single trader builds a long position over two market buys at different prices, demonstrating the clearing layer's VWAP-style `avg_entry` computation. Alice first buys 10 contracts at 100 (avg_entry = 100), then buys another 10 at 110 (avg_entry weighted to 105). The maker takes the matching short side at the same VWAP. Useful for asking: how does the engine track entry price across multiple fills? What is the unrealized P&L baseline an account is compared against?\n\nFinal mark settles back to 100 via a small mark-book so the scenario doesn't trigger liquidations — this is a `walkthrough`, not stress.",
+  "headline": "Two market buys, 10@100 then 10@110, leave Alice long 20 contracts at avg_entry 105 — VWAP via the clearing layer.",
+  "params": {
+    "rounds": 5,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 200,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 5000},
+          {"account": 100, "amount": 5000}
+        ],
+        "trades": [
+          {"id": 4001, "account": 100, "side": "Sell", "qty": 10, "kind": "Limit", "price": 100}
+        ]
+      },
+      {
+        "height": 2,
+        "trades": [
+          {"id": 4002, "account": 10, "side": "Buy", "qty": 10, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 3,
+        "trades": [
+          {"id": 4003, "account": 100, "side": "Sell", "qty": 10, "kind": "Limit", "price": 110}
+        ]
+      },
+      {
+        "height": 4,
+        "trades": [
+          {"id": 4004, "account": 10, "side": "Buy", "qty": 10, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 5,
+        "trades": [
+          {"id": 4005, "account": 1, "side": "Buy",  "qty": 1, "kind": "Limit", "price": 99},
+          {"id": 4006, "account": 2, "side": "Sell", "qty": 1, "kind": "Limit", "price": 101}
+        ]
+      }
+    ]
+  },
+  "expected_outcomes": [
+    {
+      "name": "two-traders",
+      "description": "Exactly 2 accounts touched by trades (Alice + maker)",
+      "check": {
+        "final_account_count": 2
+      }
+    },
+    {
+      "name": "two-fills",
+      "description": "Exactly two fills (the two staged market buys)",
+      "check": {
+        "fills_min": 2
+      }
+    },
+    {
+      "name": "fills-bounded",
+      "description": "No surprise fills beyond the two buys",
+      "check": {
+        "fills_max": 2
+      }
+    },
+    {
+      "name": "no-liquidations",
+      "description": "Alice's collateral covers her position; zero liquidation scan-hits (this is a walkthrough, not stress)",
+      "check": {
+        "liquidations_max": 0
+      }
+    },
+    {
+      "name": "alice-long-20",
+      "description": "Alice ends with +20 long after both market buys",
+      "check": {
+        "account_position": {"account": 10, "expected": 20}
+      }
+    },
+    {
+      "name": "alice-avg-entry-105",
+      "description": "Alice's avg_entry is the VWAP of the two fills: (10×100 + 10×110) / 20 = 105",
+      "check": {
+        "account_avg_entry": {"account": 10, "expected": 105}
+      }
+    },
+    {
+      "name": "maker-short-20",
+      "description": "Maker ends with the matching -20 short at the same VWAP",
+      "check": {
+        "account_position": {"account": 100, "expected": -20}
+      }
+    },
+    {
+      "name": "maker-avg-entry-105",
+      "description": "Maker's avg_entry is symmetrically the same VWAP of 105",
+      "check": {
+        "account_avg_entry": {"account": 100, "expected": 105}
+      }
+    }
+  ]
+}
