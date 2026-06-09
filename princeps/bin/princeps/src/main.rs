@@ -41,6 +41,7 @@
 //! lands in Stage 13f.
 
 mod genesis;
+mod irm_curve_demo;
 mod keystore;
 mod observability;
 mod scenario;
@@ -378,6 +379,15 @@ enum Command {
         #[command(subcommand)]
         action: ScenarioAction,
     },
+
+    /// Standalone IRM curve demo. Samples the borrow-rate-vs-
+    /// utilization curve at 11 points (0%, 10%, …, 100%) against the
+    /// default lending market's IrmParams using the same
+    /// `princeps_lending::compute_borrow_rate` kernel the on-chain
+    /// accrual uses every block. Pure Rust — no Reth, no Malachite,
+    /// no validator. Same flow the scenario runner v2 path
+    /// dispatches for the `lending-irm-curve` scenario.
+    IrmCurveDemo,
 }
 
 #[derive(Debug, Subcommand)]
@@ -689,6 +699,10 @@ fn main() -> eyre::Result<()> {
             validator_keystore_passphrase_stdin,
         )),
         Command::Scenario { action } => run_scenario(action),
+        Command::IrmCurveDemo => {
+            irm_curve_demo::run_irm_curve_demo_cli();
+            Ok(())
+        }
     }
 }
 

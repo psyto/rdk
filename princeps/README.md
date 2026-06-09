@@ -46,11 +46,12 @@ princeps scenario run cross-margin-survival
 princeps scenario run cross-margin-survival --dry-run
 ```
 
-Four scenarios ship today:
-- **`cross-margin-survival`** (v2, no validator) — canonical prime broker thesis at 10% crash; ✓ all 4 outcomes verify.
-- **`cross-margin-edge`** (v2, no validator) — mid-stress at 5% crash; ✓ all 5 outcomes verify.
-- **`cross-margin-fail`** (v2, no validator) — 50% deep crash, unified still HEALTHY; ✓ all 3 outcomes verify.
-- `manual-lending-walkthrough` (v1, sub-process) — hands-on lending CLI walkthrough against a scenario-local state file.
+Five scenarios ship today:
+- **`cross-margin-survival`** (stress, v2 no validator) — canonical prime broker thesis at 10% crash; ✓ all 4 outcomes verify.
+- **`cross-margin-edge`** (stress, v2 no validator) — mid-stress at 5% crash; ✓ all 5 outcomes verify.
+- **`cross-margin-fail`** (stress, v2 no validator) — 50% deep crash, unified still HEALTHY; ✓ all 3 outcomes verify.
+- **`lending-irm-curve`** (walkthrough, v2 no validator) — 11-point IRM curve sweep (0% → 100% utilization in 10% steps) using `princeps_lending::compute_borrow_rate`; surfaces the 80% kink + 11x slope-jump factor; ✓ all 5 outcomes verify.
+- `manual-lending-walkthrough` (walkthrough, v1 sub-process) — hands-on lending CLI walkthrough against a scenario-local state file.
 
 Dial flag on `scenario run`: pass `--eth-crash-price <N>` to override the value baked into any `lending-demo`-based scenario step. Lets a buyer ask "what changes if the crash were 80 instead of 90?" without editing the JSON.
 

@@ -1,0 +1,46 @@
+{
+  "name": "lending-irm-curve",
+  "category": "walkthrough",
+  "description": "Walks the borrow-rate-vs-utilization curve for the default princeps lending market's IrmParams. Samples 11 utilization points (0%, 10%, …, 100%) and evaluates `princeps_lending::compute_borrow_rate` at each — the same kernel function the on-chain accrual loop uses every block. Useful for asking: where is the kink? How much steeper does the slope get above it? At what utilization does the rate become punishing enough to discourage further borrowing?\n\nThe default market: base 0, slope-below-kink = RAY/10_000, slope-above-kink = RAY/1_000 (10x steeper), kink at 80%. Pure-Rust dispatch in v2 — no Reth, no Malachite, no validator.",
+  "headline": "11-point IRM curve sweep; rate climbs ~10x steeper above the 80% kink — the design knob a prime broker tunes to discourage utilization stress.",
+  "steps": [
+    {
+      "explanation": "Sweep utilization 0% → 100% in 10% steps and compute the borrow rate at each point with the default lending market's IrmParams.",
+      "command": "princeps irm-curve-demo",
+      "expect": "kink"
+    }
+  ],
+  "expected_outcomes": [
+    {
+      "name": "eleven-samples",
+      "description": "Curve has 11 evenly-spaced utilization samples",
+      "check": {
+        "irm_sample_count_exact": 11
+      }
+    },
+    {
+      "name": "kink-at-80-percent",
+      "description": "The kink sits at 8000 bps (80% utilization)",
+      "check": {
+        "irm_kink_bps_exact": 8000
+      }
+    },
+    {
+      "name": "base-rate-zero",
+      "description": "Base rate is exactly zero at zero utilization",
+      "check": "irm_base_rate_zero"
+    },
+    {
+      "name": "monotonic",
+      "description": "Curve is monotonically non-decreasing across the sweep",
+      "check": "irm_curve_monotonic_non_decreasing"
+    },
+    {
+      "name": "slope-jump-at-least-5x",
+      "description": "Slope-jump factor (rate@max / rate@kink) is at least 5x — the above-kink slope structurally steeper than below-kink",
+      "check": {
+        "irm_slope_jump_ratio_min": 5
+      }
+    }
+  ]
+}

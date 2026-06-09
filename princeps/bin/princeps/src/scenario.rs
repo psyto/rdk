@@ -91,10 +91,16 @@ pub struct ExpectedOutcome {
 
 /// Engine-specific check schema for princeps. JSON-serialized using
 /// externally-tagged form so authors write `{"unified_verdict": "HEALTHY"}`
-/// rather than `{"kind": "unified_verdict", "value": "HEALTHY"}`.
+/// rather than `{"kind": "unified_verdict", "value": "HEALTHY"}`. Unit
+/// variants serialize as bare strings, e.g. `"irm_base_rate_zero"`.
+///
+/// Checks dispatch on their own variant to the matching `StepResult`
+/// type: lending-demo checks look at the last `LendingDemo` result;
+/// IRM checks at the last `IrmCurve` result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LendingCheck {
+    // --- LendingDemo (cross-margin) checks ---
     /// Assert the siloed-perp verdict string. Accepts "LIQUIDATABLE" or "HEALTHY".
     SiloedVerdict(String),
     /// Assert the unified-portfolio verdict string.
@@ -107,6 +113,21 @@ pub enum LendingCheck {
     UnifiedFreeMax(i128),
     /// Assert the unified free equity is at least this value.
     UnifiedFreeMin(i128),
+
+    // --- IrmCurve checks ---
+    /// Assert exact sample count on the IRM curve.
+    IrmSampleCountExact(usize),
+    /// Assert the IRM kink is at this exact utilization (bps).
+    IrmKinkBpsExact(u16),
+    /// Assert the base rate is exactly zero at zero utilization.
+    IrmBaseRateZero,
+    /// Assert the IRM curve never decreases as utilization rises.
+    IrmCurveMonotonicNonDecreasing,
+    /// Assert the slope-jump factor (rate@max / rate@kink) is at least
+    /// this integer ratio. For the default params (slope_above = 10x
+    /// slope_below) the actual factor is ~11; setting this to 5 gives
+    /// a conservative floor.
+    IrmSlopeJumpRatioMin(u32),
 }
 
 /// Per-outcome evaluation status used in the OUTCOMES section.
@@ -116,7 +137,7 @@ pub enum OutcomeStatus {
     Fail(String),
 }
 
-/// Evaluate one check against a [`LendingDemoResult`].
+/// Evaluate one LendingDemo-targeted check against a [`LendingDemoResult`].
 pub fn evaluate_lending_check(
     check: &LendingCheck,
     result: &crate::LendingDemoResult,
@@ -178,6 +199,70 @@ pub fn evaluate_lending_check(
                 ))
             }
         }
+        // IRM checks are evaluated by `evaluate_irm_check` against an
+        // IrmCurveDemoResult — they don't apply to LendingDemoResult.
+        LendingCheck::IrmSampleCountExact(_)
+        | LendingCheck::IrmKinkBpsExact(_)
+        | LendingCheck::IrmBaseRateZero
+        | LendingCheck::IrmCurveMonotonicNonDecreasing
+        | LendingCheck::IrmSlopeJumpRatioMin(_) => OutcomeStatus::Fail(
+            "this check targets the IRM curve, not the lending demo".to_string(),
+        ),
+    }
+}
+
+/// Evaluate one IrmCurve-targeted check against an [`IrmCurveDemoResult`].
+pub fn evaluate_irm_check(
+    check: &LendingCheck,
+    result: &crate::irm_curve_demo::IrmCurveDemoResult,
+) -> OutcomeStatus {
+    match check {
+        LendingCheck::IrmSampleCountExact(expected) => {
+            if result.sample_count() == *expected {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed sample count = {}",
+                    result.sample_count()
+                ))
+            }
+        }
+        LendingCheck::IrmKinkBpsExact(expected) => {
+            if result.kink_bps == *expected {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!("observed kink_bps = {}", result.kink_bps))
+            }
+        }
+        LendingCheck::IrmBaseRateZero => {
+            if result.base_rate_per_block == 0 {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed base_rate_per_block = {}",
+                    result.base_rate_per_block
+                ))
+            }
+        }
+        LendingCheck::IrmCurveMonotonicNonDecreasing => {
+            if result.is_monotonic_non_decreasing() {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail("curve has a decreasing segment".to_string())
+            }
+        }
+        LendingCheck::IrmSlopeJumpRatioMin(min) => {
+            let jump = result.slope_jump_ratio().unwrap_or(0.0);
+            if jump >= f64::from(*min) {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!("observed slope-jump factor = {jump:.2}x"))
+            }
+        }
+        // Non-IRM checks don't apply here.
+        _ => OutcomeStatus::Fail(
+            "this check targets the lending demo, not the IRM curve".to_string(),
+        ),
     }
 }
 
@@ -328,6 +413,8 @@ fn cta_footer() -> String {
 pub enum InProcessTarget {
     /// `princeps lending-demo --eth-crash-price <N>`
     LendingDemo { eth_crash_price: u128 },
+    /// `princeps irm-curve-demo`
+    IrmCurveDemo,
 }
 
 /// Try to parse a step's command into an in-process target. Returns
@@ -338,6 +425,9 @@ pub fn try_parse_in_process(command: &str) -> Option<InProcessTarget> {
     if let Some(rest) = trimmed.strip_prefix(prefix) {
         let n: u128 = rest.trim().parse().ok()?;
         return Some(InProcessTarget::LendingDemo { eth_crash_price: n });
+    }
+    if trimmed == "princeps irm-curve-demo" {
+        return Some(InProcessTarget::IrmCurveDemo);
     }
     None
 }
@@ -357,6 +447,7 @@ pub fn is_v2_eligible(scenario: &Scenario) -> bool {
 #[derive(Debug, Clone)]
 enum StepResult {
     LendingDemo(crate::LendingDemoResult),
+    IrmCurve(crate::irm_curve_demo::IrmCurveDemoResult),
 }
 
 /// Per-run dial overrides supplied by the CLI. Each field is optional;
@@ -429,6 +520,10 @@ fn run_embedded_v2(
                     }
                 }
             }
+            InProcessTarget::IrmCurveDemo => {
+                let r = crate::irm_curve_demo::run_irm_curve_demo_structured();
+                results.push(StepResult::IrmCurve(r));
+            }
         }
     }
 
@@ -470,16 +565,14 @@ fn render_v2_sections(
     }
     println!();
 
-    // TIMELINE — derive from each captured result. For LendingDemo,
-    // each result contributes the 4-step demo sequence (deposit,
-    // borrow, perp open, market shock).
+    // TIMELINE — derive from each captured result.
     println!("TIMELINE:");
     for (i, r) in results.iter().enumerate() {
+        if results.len() > 1 {
+            println!("  [scenario step {}]", i + 1);
+        }
         match r {
             StepResult::LendingDemo(d) => {
-                if results.len() > 1 {
-                    println!("  [scenario step {}]", i + 1);
-                }
                 println!(
                     "    deposit  {} USDC as lending collateral",
                     d.initial_collateral_usdc
@@ -499,17 +592,33 @@ fn render_v2_sections(
                     d.perp_entry_mark, d.eth_crash_price
                 );
             }
+            StepResult::IrmCurve(d) => {
+                println!(
+                    "    sample     {} utilization points (0%, 10%, …, 100%)",
+                    d.sample_count()
+                );
+                println!(
+                    "    evaluate   compute_borrow_rate at each point with default IrmParams (kink {}%)",
+                    d.kink_bps / 100
+                );
+                if let Some(jump) = d.slope_jump_ratio() {
+                    println!(
+                        "    summarize  base rate {}; slope-jump factor at max utilization = {jump:.2}x",
+                        d.base_rate_per_block
+                    );
+                }
+            }
         }
     }
     println!();
 
-    // DELTA — before vs after, for the entities the scenario cares about.
+    // DELTA — before vs after / spread.
     println!("DELTA:");
-    println!("  view                       free equity   verdict");
-    println!("  -------------------------  -----------   ------------");
     for r in results {
         match r {
             StepResult::LendingDemo(d) => {
+                println!("  view                       free equity   verdict");
+                println!("  -------------------------  -----------   ------------");
                 println!(
                     "  siloed (perp only)         {:>11}   {}",
                     d.siloed_free_equity,
@@ -520,6 +629,26 @@ fn render_v2_sections(
                     d.unified_free_equity,
                     d.unified_verdict()
                 );
+            }
+            StepResult::IrmCurve(d) => {
+                println!("  IRM curve (utilization → rate, as fraction of RAY):");
+                println!("    {:<13}  {:<15}  Note", "Utilization", "Rate (×RAY)");
+                println!("    {:-<13}  {:-<15}  {}", "", "", "----");
+                for p in &d.points {
+                    let note = if p.utilization_bps == d.kink_bps {
+                        "kink"
+                    } else if p.utilization_bps == 10_000 {
+                        "max"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "    {:>10}%   {:<15.8}  {}",
+                        p.utilization_bps / 100,
+                        p.rate_as_ray_fraction,
+                        note
+                    );
+                }
             }
         }
     }
@@ -565,23 +694,48 @@ fn evaluate_all_outcomes<'a>(
     scenario: &'a Scenario,
     results: &[StepResult],
 ) -> Vec<(&'a ExpectedOutcome, OutcomeStatus)> {
-    // For princeps v2-eligible scenarios today, every step is a
-    // LendingDemo. When multiple steps exist, we evaluate each
-    // outcome against the LAST result (convention: outcomes describe
-    // end state). Multi-result scenarios that want per-step outcomes
-    // can land later.
+    // Each check variant has an implied target result type:
+    //   * LendingDemo checks (SiloedVerdict, UnifiedFreeMin, …) target
+    //     the last LendingDemo result.
+    //   * IRM checks (IrmSampleCountExact, IrmKinkBpsExact, …) target
+    //     the last IrmCurve result.
+    // The convention is "outcomes describe end state": when multiple
+    // steps of the same target type exist, we evaluate against the LAST.
     let last_lending = results.iter().rev().find_map(|r| match r {
         StepResult::LendingDemo(d) => Some(d),
+        _ => None,
+    });
+    let last_irm = results.iter().rev().find_map(|r| match r {
+        StepResult::IrmCurve(d) => Some(d),
+        _ => None,
     });
 
     scenario
         .expected_outcomes
         .iter()
         .map(|outcome| {
-            let status = if let Some(d) = last_lending {
-                evaluate_lending_check(&outcome.check, d)
-            } else {
-                OutcomeStatus::Fail("no lending-demo result available".to_string())
+            let status = match &outcome.check {
+                LendingCheck::SiloedVerdict(_)
+                | LendingCheck::UnifiedVerdict(_)
+                | LendingCheck::SiloedFreeMax(_)
+                | LendingCheck::SiloedFreeMin(_)
+                | LendingCheck::UnifiedFreeMax(_)
+                | LendingCheck::UnifiedFreeMin(_) => match last_lending {
+                    Some(d) => evaluate_lending_check(&outcome.check, d),
+                    None => OutcomeStatus::Fail(
+                        "no lending-demo result available".to_string(),
+                    ),
+                },
+                LendingCheck::IrmSampleCountExact(_)
+                | LendingCheck::IrmKinkBpsExact(_)
+                | LendingCheck::IrmBaseRateZero
+                | LendingCheck::IrmCurveMonotonicNonDecreasing
+                | LendingCheck::IrmSlopeJumpRatioMin(_) => match last_irm {
+                    Some(d) => evaluate_irm_check(&outcome.check, d),
+                    None => OutcomeStatus::Fail(
+                        "no IRM curve result available".to_string(),
+                    ),
+                },
             };
             (outcome, status)
         })
@@ -841,6 +995,7 @@ mod tests {
             InProcessTarget::LendingDemo { eth_crash_price } => {
                 assert_eq!(eth_crash_price, 90);
             }
+            _ => panic!("expected LendingDemo, got {t:?}"),
         }
     }
 
@@ -850,6 +1005,69 @@ mod tests {
             .expect("should match after trim");
         match t {
             InProcessTarget::LendingDemo { eth_crash_price } => assert_eq!(eth_crash_price, 42),
+            _ => panic!("expected LendingDemo, got {t:?}"),
+        }
+    }
+
+    #[test]
+    fn try_parse_in_process_matches_irm_curve_demo() {
+        assert!(matches!(
+            try_parse_in_process("princeps irm-curve-demo"),
+            Some(InProcessTarget::IrmCurveDemo)
+        ));
+        assert!(matches!(
+            try_parse_in_process("  princeps irm-curve-demo  "),
+            Some(InProcessTarget::IrmCurveDemo)
+        ));
+    }
+
+    #[test]
+    fn evaluate_irm_check_passes() {
+        let r = crate::irm_curve_demo::run_irm_curve_demo_structured();
+        assert!(matches!(
+            evaluate_irm_check(&LendingCheck::IrmSampleCountExact(11), &r),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_irm_check(&LendingCheck::IrmKinkBpsExact(8000), &r),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_irm_check(&LendingCheck::IrmBaseRateZero, &r),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_irm_check(&LendingCheck::IrmCurveMonotonicNonDecreasing, &r),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_irm_check(&LendingCheck::IrmSlopeJumpRatioMin(5), &r),
+            OutcomeStatus::Pass
+        ));
+        // Failure case:
+        assert!(matches!(
+            evaluate_irm_check(&LendingCheck::IrmKinkBpsExact(9999), &r),
+            OutcomeStatus::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn lending_check_against_irm_returns_fail_with_helpful_message() {
+        let r = crate::LendingDemoResult {
+            eth_crash_price: 90,
+            initial_collateral_usdc: 1000,
+            borrowed_eth_units: 5,
+            perp_position_size: 10,
+            perp_entry_mark: 100,
+            perp_margin_usdc: 50,
+            siloed_free_equity: -140,
+            unified_free_equity: 360,
+        };
+        // An IRM check applied via the lending-check function should
+        // return Fail with the type-mismatch hint.
+        match evaluate_lending_check(&LendingCheck::IrmSampleCountExact(11), &r) {
+            OutcomeStatus::Fail(why) => assert!(why.contains("IRM curve")),
+            _ => panic!("expected Fail"),
         }
     }
 
