@@ -431,6 +431,22 @@ enum ScenarioAction {
         /// sub-process scenarios.
         #[arg(long)]
         eth_crash_price: Option<u128>,
+        /// v2 dial: override the lending-market LT bps (default 9500 =
+        /// 95% LT). Tighter (lower) LT → easier liquidation; looser
+        /// (higher) → harder.
+        #[arg(long)]
+        ltv: Option<u16>,
+        /// v2 dial: override the lending-market liquidation bonus bps
+        /// (default 500 = 5% bonus). Raises the liquidator's payoff;
+        /// affects the discount applied to seized collateral.
+        #[arg(long)]
+        liquidation_penalty: Option<u16>,
+        /// v2 dial: shock the lending-side ETH oracle ±bps relative to
+        /// the perp's view of the crash price. Default 0 = no
+        /// divergence. ±N bps stress-tests the unified-vs-siloed
+        /// margin gap under oracle divergence.
+        #[arg(long, allow_negative_numbers = true)]
+        oracle_shock: Option<i16>,
     },
 }
 
@@ -730,14 +746,27 @@ fn run_scenario(action: ScenarioAction) -> eyre::Result<()> {
             print!("{}", scenario::render_show(&s, &path));
             Ok(())
         }
-        ScenarioAction::Run { name, dir, dry_run, eth_crash_price } => {
+        ScenarioAction::Run {
+            name,
+            dir,
+            dry_run,
+            eth_crash_price,
+            ltv,
+            liquidation_penalty,
+            oracle_shock,
+        } => {
             let path = dir.join(format!("{name}.json"));
             let s = scenario::load_from_path(&path)?;
             if dry_run {
                 print!("{}", scenario::render_run_v0(&s, &path));
                 Ok(())
             } else {
-                let dials = scenario::DialOverrides { eth_crash_price };
+                let dials = scenario::DialOverrides {
+                    eth_crash_price,
+                    ltv_bps: ltv,
+                    liquidation_penalty_bps: liquidation_penalty,
+                    oracle_shock_bps: oracle_shock,
+                };
                 let report = scenario::run_embedded(&s, &path, &dials)?;
                 if report.failed > 0 {
                     Err(eyre::eyre!(
@@ -774,6 +803,18 @@ fn tokio_rt() -> eyre::Result<tokio::runtime::Runtime> {
 pub struct LendingDemoResult {
     /// `--eth-crash-price` value the demo was run at.
     pub eth_crash_price: u128,
+    /// Liquidation threshold (LT) bps applied to the lending market.
+    pub ltv_bps: u16,
+    /// Liquidation penalty / bonus bps applied to the lending market.
+    pub liquidation_penalty_bps: u16,
+    /// Oracle shock bps applied to the LENDING-side ETH oracle relative
+    /// to the perp's view (`eth_crash_price`). 0 = no divergence.
+    /// Positive = lending oracle higher than perp (lending healthier);
+    /// negative = lending oracle lower (lending underwater first).
+    pub oracle_shock_bps: i16,
+    /// Effective lending-side oracle price after the shock is applied.
+    /// Equals `eth_crash_price * (10000 + oracle_shock_bps) / 10000`.
+    pub lending_oracle_price: u128,
     /// Entry: USDC collateral deposited at step 1.
     pub initial_collateral_usdc: u128,
     /// Entry: ETH borrowed at step 2 (units).
@@ -791,6 +832,38 @@ pub struct LendingDemoResult {
     /// portfolio margin) at the crash mark. Negative → unified-
     /// liquidatable.
     pub unified_free_equity: i128,
+}
+
+/// Per-run configuration for the lending demo. Defaults reproduce the
+/// canonical v0 Stage 24b demo; CLI dials on `princeps scenario run`
+/// (and `princeps lending-demo`) override individual fields.
+#[derive(Debug, Clone, Copy)]
+pub struct LendingDemoConfig {
+    /// Crash mark for ETH expressed in USDC. Drives both the perp mark
+    /// and the lending oracle (subject to `oracle_shock_bps`).
+    pub eth_crash_price: u128,
+    /// Liquidation threshold (LT) bps for the USDC/ETH market. 9500 =
+    /// 95% LT, the v0 baseline.
+    pub ltv_bps: u16,
+    /// Liquidation penalty / bonus bps for the USDC/ETH market. 500 =
+    /// 5% bonus, the v0 baseline.
+    pub liquidation_penalty_bps: u16,
+    /// Oracle shock bps applied to the LENDING-side oracle vs perp's
+    /// view. Default 0 = no divergence. ±N bps shocks the lending
+    /// oracle ±N bps relative to `eth_crash_price`. Stress-tests the
+    /// unified-vs-siloed margin gap under oracle divergence.
+    pub oracle_shock_bps: i16,
+}
+
+impl Default for LendingDemoConfig {
+    fn default() -> Self {
+        Self {
+            eth_crash_price: 90,
+            ltv_bps: 9_500,
+            liquidation_penalty_bps: 500,
+            oracle_shock_bps: 0,
+        }
+    }
 }
 
 impl LendingDemoResult {
@@ -812,7 +885,7 @@ impl LendingDemoResult {
 /// the structured result instead of printing. Callers that want the
 /// printed form (e.g., the `princeps lending-demo` CLI subcommand)
 /// wrap this and print themselves.
-pub fn run_lending_demo_structured(eth_crash_price: u128) -> eyre::Result<LendingDemoResult> {
+pub fn run_lending_demo_structured(config: LendingDemoConfig) -> eyre::Result<LendingDemoResult> {
     use rdk_clearing::Account;
     use rdk_clob::AccountId;
     use princeps_lending::{AssetId, Bps, Index as LendingIndex, IrmParams, Market, MarketId};
@@ -824,10 +897,17 @@ pub fn run_lending_demo_structured(eth_crash_price: u128) -> eyre::Result<Lendin
     const PERP_ENTRY: u64 = 100;
     const PERP_MARGIN: u64 = 50;
 
+    let LendingDemoConfig {
+        eth_crash_price,
+        ltv_bps,
+        liquidation_penalty_bps,
+        oracle_shock_bps,
+    } = config;
+
     let chain_spec = dev_chain_spec();
     let bridge = LiveRethEvmBridge::new((), chain_spec);
 
-    // Register a single USDC/ETH lending market with the standard v0 params.
+    // Register a single USDC/ETH lending market with config-driven params.
     bridge.with_markets_mut(|m| {
         let mut market = Market::new(
             MarketId(0),
@@ -839,9 +919,9 @@ pub fn run_lending_demo_structured(eth_crash_price: u128) -> eyre::Result<Lendin
                 slope_above_kink_per_block: LendingIndex::RAY / 1_000,
                 kink_bps: Bps(8_000),
             },
-            Bps(9_500), // LT 95%
-            Bps(500),   // liquidation bonus 5%
-            Bps(1_000), // reserve factor 10%
+            Bps(ltv_bps),                 // LT (dial)
+            Bps(liquidation_penalty_bps), // liquidation bonus (dial)
+            Bps(1_000),                   // reserve factor 10%
             0,
         );
         market.total_supplied = 1_000_000;
@@ -869,8 +949,18 @@ pub fn run_lending_demo_structured(eth_crash_price: u128) -> eyre::Result<Lendin
         map.insert(alice, a);
     });
 
+    // Apply oracle_shock_bps to the LENDING-side oracle. Perp uses
+    // `eth_crash_price` directly. Positive shock = lending side higher
+    // (healthier on the lending leg); negative = lending side underwater
+    // first. The bps multiplier is `10000 + oracle_shock_bps`.
+    let oracle_mul: i32 = 10_000i32 + i32::from(oracle_shock_bps);
+    let lending_oracle_price: u128 = if oracle_mul <= 0 {
+        0
+    } else {
+        eth_crash_price * (oracle_mul as u128) / 10_000
+    };
     let mut crash_prices: BTreeMap<MarketId, (u128, u128)> = BTreeMap::new();
-    crash_prices.insert(MarketId(0), (1, eth_crash_price));
+    crash_prices.insert(MarketId(0), (1, lending_oracle_price));
     let empty_prices: BTreeMap<MarketId, (u128, u128)> = BTreeMap::new();
     let crash_mark = MarkPrice(u64::try_from(eth_crash_price).unwrap_or(u64::MAX));
 
@@ -881,6 +971,10 @@ pub fn run_lending_demo_structured(eth_crash_price: u128) -> eyre::Result<Lendin
 
     Ok(LendingDemoResult {
         eth_crash_price,
+        ltv_bps,
+        liquidation_penalty_bps,
+        oracle_shock_bps,
+        lending_oracle_price,
         initial_collateral_usdc: INITIAL_COLLATERAL,
         borrowed_eth_units: BORROW_AMOUNT,
         perp_position_size: PERP_POSITION,
@@ -910,7 +1004,10 @@ fn run_lending_demo(eth_crash_price: u128) -> eyre::Result<()> {
     println!("    Run with --nocapture in tests, or `cargo run --bin princeps -- lending-demo`.");
     println!();
 
-    let r = run_lending_demo_structured(eth_crash_price)?;
+    let r = run_lending_demo_structured(LendingDemoConfig {
+        eth_crash_price,
+        ..LendingDemoConfig::default()
+    })?;
 
     println!(
         "[Step 1] Alice deposits {} USDC as lending collateral.",

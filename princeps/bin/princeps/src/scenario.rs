@@ -460,6 +460,14 @@ pub struct DialOverrides {
     /// Override the `--eth-crash-price` argument on lending-demo
     /// in-process targets.
     pub eth_crash_price: Option<u128>,
+    /// Override the lending-market LT bps (default 9500 = 95% LT).
+    pub ltv_bps: Option<u16>,
+    /// Override the lending-market liquidation penalty bps (default
+    /// 500 = 5% bonus).
+    pub liquidation_penalty_bps: Option<u16>,
+    /// Shock the lending-side ETH oracle ±bps relative to perp's view
+    /// of the crash price. Default 0 = no divergence.
+    pub oracle_shock_bps: Option<i16>,
 }
 
 /// Embedded execution. For v2-eligible scenarios (every step matches
@@ -492,11 +500,24 @@ fn run_embedded_v2(
         "─── scenario: {} ────────────────────────────────────",
         scenario.name
     );
-    if dials.eth_crash_price.is_some() {
+    let any_dial = dials.eth_crash_price.is_some()
+        || dials.ltv_bps.is_some()
+        || dials.liquidation_penalty_bps.is_some()
+        || dials.oracle_shock_bps.is_some();
+    if any_dial {
         println!();
-        println!("DIAL OVERRIDES (from --eth-crash-price flag):");
+        println!("DIAL OVERRIDES (from CLI flags):");
         if let Some(p) = dials.eth_crash_price {
-            println!("    eth_crash_price : {p}");
+            println!("    eth_crash_price     : {p}");
+        }
+        if let Some(l) = dials.ltv_bps {
+            println!("    ltv_bps             : {l}");
+        }
+        if let Some(l) = dials.liquidation_penalty_bps {
+            println!("    liquidation_penalty : {l} bps");
+        }
+        if let Some(s) = dials.oracle_shock_bps {
+            println!("    oracle_shock_bps    : {s:+}");
         }
     }
     println!();
@@ -509,10 +530,20 @@ fn run_embedded_v2(
             .expect("v2-eligible scenario must have all-in-process steps");
         match target {
             InProcessTarget::LendingDemo { eth_crash_price } => {
-                // Apply dial override if present; otherwise use the
-                // JSON-baked value.
-                let effective_price = dials.eth_crash_price.unwrap_or(eth_crash_price);
-                match crate::run_lending_demo_structured(effective_price) {
+                // CLI dials override the JSON-baked values; unset dials
+                // fall back to LendingDemoConfig::default().
+                let defaults = crate::LendingDemoConfig::default();
+                let cfg = crate::LendingDemoConfig {
+                    eth_crash_price: dials.eth_crash_price.unwrap_or(eth_crash_price),
+                    ltv_bps: dials.ltv_bps.unwrap_or(defaults.ltv_bps),
+                    liquidation_penalty_bps: dials
+                        .liquidation_penalty_bps
+                        .unwrap_or(defaults.liquidation_penalty_bps),
+                    oracle_shock_bps: dials
+                        .oracle_shock_bps
+                        .unwrap_or(defaults.oracle_shock_bps),
+                };
+                match crate::run_lending_demo_structured(cfg) {
                     Ok(r) => results.push(StepResult::LendingDemo(r)),
                     Err(e) => {
                         eprintln!("step '{}' failed: {e}", step.explanation);
