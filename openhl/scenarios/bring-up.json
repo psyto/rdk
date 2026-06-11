@@ -1,0 +1,45 @@
+{
+  "name": "bring-up",
+  "category": "bring-up",
+  "compare_key": "perp-bring-up",
+  "description": "Stand up an openhl perp market from zero. On the EVM side this is *implicit*: the `LiveRethEvmBridge<()>` is constructed with the market struct already in its initial state, and the first deposit is just an entry in the bridge's `accounts` map. There is no per-market PDA to allocate, no Market header to initialize separately, no vault PDA to derive — the bridge IS the market. Contrast this with `openhl-solana/bring-up` (same `compare_key`), where reaching the same state requires 5 on-chain instructions and ~4 distinct accounts (raw Market alloc, Initialize, market PDA via invoke_signed, per-(market,mint) vault PDA, CPI deposit). The diff is the account model.",
+  "headline": "openhl is up; the first deposit lands. Zero PDAs allocated — the bridge state IS the market.",
+  "params": {
+    "rounds": 3,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 200,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 100}
+        ]
+      }
+    ]
+  },
+  "expected_outcomes": [
+    {
+      "name": "one-account-from-one-deposit",
+      "description": "Single deposit lands a single trading account — no per-account PDA allocation along the way.",
+      "check": {"final_account_count": 1}
+    },
+    {
+      "name": "no-trades-no-fills",
+      "description": "Bring-up emits no fills (no orders submitted).",
+      "check": {"fills_max": 0}
+    },
+    {
+      "name": "no-liquidations",
+      "description": "Quiet bring-up — the scanner finds nothing to flag.",
+      "check": {"liquidations_max": 0}
+    },
+    {
+      "name": "account-collateral-matches-deposit",
+      "description": "Account 10's post-bring-up collateral equals the deposited amount; nothing has moved it.",
+      "check": {"account_collateral": {"account": 10, "expected": 100}}
+    }
+  ]
+}
