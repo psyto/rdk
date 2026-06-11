@@ -33,5 +33,32 @@
       "explanation": "Inspect the full state file.",
       "command": "princeps lending list --state-file ./.princeps-walkthrough-state.json"
     }
+  ],
+  "expected_outcomes": [
+    {
+      "name": "one-position-landed",
+      "description": "Exactly one open position after the walkthrough (account 1).",
+      "check": {"walk_position_count": 1}
+    },
+    {
+      "name": "alice-collateral-1000",
+      "description": "Account 1's collateral is 1000 USDC.",
+      "check": {"walk_account_collateral": {"account": 1, "amount": 1000}}
+    },
+    {
+      "name": "alice-has-debt",
+      "description": "Account 1 carries borrowed ETH (scaled_debt > 0).",
+      "check": {"walk_account_has_debt": {"account": 1}}
+    },
+    {
+      "name": "last-health-healthy",
+      "description": "Even at ETH=2 the cross-margin LT cushion holds — last health step is HEALTHY.",
+      "check": {"walk_health_verdict": "HEALTHY"}
+    },
+    {
+      "name": "scan-clean-at-eth-2",
+      "description": "Scan at ETH=2 flags nothing — no liquidatable accounts.",
+      "check": {"walk_scan_flagged_exact": 0}
+    }
   ]
 }

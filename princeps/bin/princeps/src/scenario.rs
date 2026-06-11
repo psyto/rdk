@@ -128,6 +128,23 @@ pub enum LendingCheck {
     /// slope_below) the actual factor is ~11; setting this to 5 gives
     /// a conservative floor.
     IrmSlopeJumpRatioMin(u32),
+
+    // --- LendingStep (walkthrough) checks ---
+    /// Assert the open-positions count at the end of the walkthrough.
+    /// Evaluated against the LAST `LendingStep` result's
+    /// `positions_after` snapshot.
+    WalkPositionCount(usize),
+    /// Assert a particular account's `collateral_amount` at the end of
+    /// the walkthrough. Position must exist or check fails.
+    WalkAccountCollateral { account: u64, amount: u128 },
+    /// Assert a particular account has nonzero `scaled_debt` at the
+    /// end of the walkthrough. Position must exist or check fails.
+    WalkAccountHasDebt { account: u64 },
+    /// Assert the verdict of the LAST `lending health` step.
+    /// Accepts "HEALTHY" or "LIQUIDATABLE".
+    WalkHealthVerdict(String),
+    /// Assert the LAST `lending scan` step flagged exactly N accounts.
+    WalkScanFlaggedExact(usize),
 }
 
 /// Per-outcome evaluation status used in the OUTCOMES section.
@@ -208,6 +225,15 @@ pub fn evaluate_lending_check(
         | LendingCheck::IrmSlopeJumpRatioMin(_) => OutcomeStatus::Fail(
             "this check targets the IRM curve, not the lending demo".to_string(),
         ),
+        // Walkthrough checks are evaluated by `evaluate_walk_check`
+        // against `LendingStepResult`s; they don't apply here.
+        LendingCheck::WalkPositionCount(_)
+        | LendingCheck::WalkAccountCollateral { .. }
+        | LendingCheck::WalkAccountHasDebt { .. }
+        | LendingCheck::WalkHealthVerdict(_)
+        | LendingCheck::WalkScanFlaggedExact(_) => OutcomeStatus::Fail(
+            "this check targets the lending walkthrough, not the lending demo".to_string(),
+        ),
     }
 }
 
@@ -259,9 +285,116 @@ pub fn evaluate_irm_check(
                 OutcomeStatus::Fail(format!("observed slope-jump factor = {jump:.2}x"))
             }
         }
-        // Non-IRM checks don't apply here.
-        _ => OutcomeStatus::Fail(
+        // LendingDemo checks don't apply here.
+        LendingCheck::SiloedVerdict(_)
+        | LendingCheck::UnifiedVerdict(_)
+        | LendingCheck::SiloedFreeMax(_)
+        | LendingCheck::SiloedFreeMin(_)
+        | LendingCheck::UnifiedFreeMax(_)
+        | LendingCheck::UnifiedFreeMin(_) => OutcomeStatus::Fail(
             "this check targets the lending demo, not the IRM curve".to_string(),
+        ),
+        // Walkthrough checks don't apply here.
+        LendingCheck::WalkPositionCount(_)
+        | LendingCheck::WalkAccountCollateral { .. }
+        | LendingCheck::WalkAccountHasDebt { .. }
+        | LendingCheck::WalkHealthVerdict(_)
+        | LendingCheck::WalkScanFlaggedExact(_) => OutcomeStatus::Fail(
+            "this check targets the lending walkthrough, not the IRM curve".to_string(),
+        ),
+    }
+}
+
+/// Evaluate one walkthrough-targeted check against a slice of
+/// [`LendingStepResult`]s captured across the run. Each variant
+/// resolves to the relevant "last" result:
+/// * Position-related checks → last step's `positions_after`.
+/// * `WalkHealthVerdict` → last step with a `health` snapshot.
+/// * `WalkScanFlaggedExact` → last step with a `scan` snapshot.
+fn evaluate_walk_check(check: &LendingCheck, results: &[LendingStepResult]) -> OutcomeStatus {
+    let last = match results.last() {
+        Some(r) => r,
+        None => return OutcomeStatus::Fail("no lending walkthrough steps ran".to_string()),
+    };
+    match check {
+        LendingCheck::WalkPositionCount(expected) => {
+            let observed = last.positions_after.len();
+            if observed == *expected {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!("observed position count = {observed}"))
+            }
+        }
+        LendingCheck::WalkAccountCollateral { account, amount } => {
+            match last
+                .positions_after
+                .iter()
+                .find(|((acc, _), _)| *acc == *account)
+            {
+                Some((_, pos)) if pos.collateral_amount == *amount => OutcomeStatus::Pass,
+                Some((_, pos)) => OutcomeStatus::Fail(format!(
+                    "account {account} collateral = {} (expected {amount})",
+                    pos.collateral_amount
+                )),
+                None => OutcomeStatus::Fail(format!("account {account} has no open position")),
+            }
+        }
+        LendingCheck::WalkAccountHasDebt { account } => {
+            match last
+                .positions_after
+                .iter()
+                .find(|((acc, _), _)| *acc == *account)
+            {
+                Some((_, pos)) if pos.scaled_debt > 0 => OutcomeStatus::Pass,
+                Some(_) => OutcomeStatus::Fail(format!(
+                    "account {account} has zero scaled_debt"
+                )),
+                None => OutcomeStatus::Fail(format!("account {account} has no open position")),
+            }
+        }
+        LendingCheck::WalkHealthVerdict(expected) => {
+            match results.iter().rev().find_map(|r| r.health.as_ref()) {
+                Some(h) => {
+                    let observed = if h.healthy { "HEALTHY" } else { "LIQUIDATABLE" };
+                    if observed == expected.as_str() {
+                        OutcomeStatus::Pass
+                    } else {
+                        OutcomeStatus::Fail(format!("observed last-health verdict = {observed}"))
+                    }
+                }
+                None => OutcomeStatus::Fail("no health step ran during the walkthrough".to_string()),
+            }
+        }
+        LendingCheck::WalkScanFlaggedExact(expected) => {
+            match results.iter().rev().find_map(|r| r.scan.as_ref()) {
+                Some(s) => {
+                    if s.flagged.len() == *expected {
+                        OutcomeStatus::Pass
+                    } else {
+                        OutcomeStatus::Fail(format!(
+                            "observed last-scan flagged = {} (expected {expected})",
+                            s.flagged.len()
+                        ))
+                    }
+                }
+                None => OutcomeStatus::Fail("no scan step ran during the walkthrough".to_string()),
+            }
+        }
+        // Non-walkthrough checks don't apply here.
+        LendingCheck::SiloedVerdict(_)
+        | LendingCheck::UnifiedVerdict(_)
+        | LendingCheck::SiloedFreeMax(_)
+        | LendingCheck::SiloedFreeMin(_)
+        | LendingCheck::UnifiedFreeMax(_)
+        | LendingCheck::UnifiedFreeMin(_) => OutcomeStatus::Fail(
+            "this check targets the lending demo, not the walkthrough".to_string(),
+        ),
+        LendingCheck::IrmSampleCountExact(_)
+        | LendingCheck::IrmKinkBpsExact(_)
+        | LendingCheck::IrmBaseRateZero
+        | LendingCheck::IrmCurveMonotonicNonDecreasing
+        | LendingCheck::IrmSlopeJumpRatioMin(_) => OutcomeStatus::Fail(
+            "this check targets the IRM curve, not the walkthrough".to_string(),
         ),
     }
 }
@@ -409,12 +542,37 @@ fn cta_footer() -> String {
 /// renders the structured HEADLINE / TIMELINE / DELTA / OUTCOMES /
 /// NEXT contract from `SANDBOX-PATTERN.md`. Otherwise the runner
 /// falls back to v1 (sub-process spawn with stdio inherit).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum InProcessTarget {
     /// `princeps lending-demo --eth-crash-price <N>`
     LendingDemo { eth_crash_price: u128 },
     /// `princeps irm-curve-demo`
     IrmCurveDemo,
+    /// `princeps lending <subcommand> ...` — per-step variant for the
+    /// hands-on lending sandbox. Steps share a single in-memory bridge
+    /// across the scenario run; `--state-file` flags are parsed but
+    /// ignored (the v2 path never persists to disk).
+    LendingStep(LendingStep),
+}
+
+/// One parsed `princeps lending` sub-step. Mirrors `LendingCommand` in
+/// `main.rs` minus the variants the walkthrough doesn't exercise
+/// (`repay`, `withdraw`, `supply`, `withdraw-supply`); add them when a
+/// scenario needs them.
+#[derive(Debug, Clone)]
+pub enum LendingStep {
+    /// `princeps lending init` — reset bridge to a fresh default market.
+    Init,
+    /// `princeps lending deposit <account> <amount>`.
+    Deposit { account: u64, amount: u128 },
+    /// `princeps lending borrow <account> <amount> --eth-price <P>`.
+    Borrow { account: u64, amount: u128, eth_price: u64 },
+    /// `princeps lending health <account> --eth-price <P>` (read-only).
+    Health { account: u64, eth_price: u64 },
+    /// `princeps lending scan --eth-price <P>` (read-only).
+    Scan { eth_price: u64 },
+    /// `princeps lending list` (read-only).
+    List,
 }
 
 /// Try to parse a step's command into an in-process target. Returns
@@ -429,7 +587,122 @@ pub fn try_parse_in_process(command: &str) -> Option<InProcessTarget> {
     if trimmed == "princeps irm-curve-demo" {
         return Some(InProcessTarget::IrmCurveDemo);
     }
-    None
+    try_parse_lending_step(trimmed).map(InProcessTarget::LendingStep)
+}
+
+/// Parse a `princeps lending <subcommand> ...` command into a
+/// [`LendingStep`]. Returns `None` if the command isn't a recognized
+/// lending subcommand, or if required arguments are missing / malformed.
+///
+/// Recognized flags:
+///   * `--state-file <path>` — parsed and discarded (in-process never
+///     touches the file system).
+///   * `--eth-price <N>` — borrow / health / scan price override.
+///
+/// Unknown flags or extra positional arguments cause this to return
+/// `None` so the step falls back to v1 sub-process spawn rather than
+/// silently dropping a flag the user supplied.
+fn try_parse_lending_step(command: &str) -> Option<LendingStep> {
+    let mut tokens = command.split_whitespace();
+    if tokens.next()? != "princeps" {
+        return None;
+    }
+    if tokens.next()? != "lending" {
+        return None;
+    }
+    let sub = tokens.next()?;
+    // Collect remaining tokens; we will pop positional args off the front
+    // and pop named flags wherever they sit.
+    let mut rest: Vec<&str> = tokens.collect();
+
+    let eth_price = pop_named_u64(&mut rest, "--eth-price")?;
+    // Discard --state-file (in-process never persists).
+    let _ = pop_named_string(&mut rest, "--state-file");
+
+    let step = match sub {
+        "init" => {
+            if !rest.is_empty() {
+                return None;
+            }
+            LendingStep::Init
+        }
+        "deposit" => {
+            let account = rest.first()?.parse::<u64>().ok()?;
+            let amount = rest.get(1)?.parse::<u128>().ok()?;
+            if rest.len() != 2 {
+                return None;
+            }
+            LendingStep::Deposit { account, amount }
+        }
+        "borrow" => {
+            let account = rest.first()?.parse::<u64>().ok()?;
+            let amount = rest.get(1)?.parse::<u128>().ok()?;
+            if rest.len() != 2 {
+                return None;
+            }
+            LendingStep::Borrow {
+                account,
+                amount,
+                eth_price: eth_price.unwrap_or(1),
+            }
+        }
+        "health" => {
+            let account = rest.first()?.parse::<u64>().ok()?;
+            if rest.len() != 1 {
+                return None;
+            }
+            LendingStep::Health {
+                account,
+                eth_price: eth_price.unwrap_or(1),
+            }
+        }
+        "scan" => {
+            if !rest.is_empty() {
+                return None;
+            }
+            LendingStep::Scan {
+                eth_price: eth_price.unwrap_or(1),
+            }
+        }
+        "list" => {
+            if !rest.is_empty() {
+                return None;
+            }
+            LendingStep::List
+        }
+        _ => return None,
+    };
+    Some(step)
+}
+
+/// Pop a `--name <value>` pair out of the token list, returning the
+/// parsed value. Returns:
+///   * `Some(Some(v))` — flag present, value parsed.
+///   * `Some(None)`    — flag absent (caller decides the default).
+///   * `None`          — flag present but value missing or malformed
+///                       (signals parse failure to the caller).
+fn pop_named_u64(tokens: &mut Vec<&str>, name: &str) -> Option<Option<u64>> {
+    match tokens.iter().position(|t| *t == name) {
+        None => Some(None),
+        Some(i) => {
+            if i + 1 >= tokens.len() {
+                return None;
+            }
+            let v = tokens[i + 1].parse::<u64>().ok()?;
+            tokens.drain(i..=i + 1);
+            Some(Some(v))
+        }
+    }
+}
+
+fn pop_named_string<'a>(tokens: &mut Vec<&'a str>, name: &str) -> Option<&'a str> {
+    let i = tokens.iter().position(|t| *t == name)?;
+    if i + 1 >= tokens.len() {
+        return None;
+    }
+    let v = tokens[i + 1];
+    tokens.drain(i..=i + 1);
+    Some(v)
 }
 
 /// True iff every step in `scenario` can be served in-process. Drives
@@ -448,6 +721,167 @@ pub fn is_v2_eligible(scenario: &Scenario) -> bool {
 enum StepResult {
     LendingDemo(crate::LendingDemoResult),
     IrmCurve(crate::irm_curve_demo::IrmCurveDemoResult),
+    LendingStep(LendingStepResult),
+}
+
+/// Per-step record for `LendingStep` execution. Carries enough
+/// information for the TIMELINE / DELTA renderers and the walkthrough
+/// outcome checks. Held in a `Vec<LendingStepResult>` across the run
+/// so checks can target "last health" or "last scan" cleanly.
+#[derive(Debug, Clone)]
+pub(crate) struct LendingStepResult {
+    /// The step that produced this result (echoed for TIMELINE).
+    pub step: LendingStep,
+    /// All open positions after the step ran. Re-snapshotted every
+    /// step so per-step DELTAs are honest even for read-only steps.
+    pub positions_after: Vec<((u64, u32), princeps_lending::Position)>,
+    /// Set for `Health` steps only.
+    pub health: Option<LendingHealthSnapshot>,
+    /// Set for `Scan` steps only.
+    pub scan: Option<LendingScanSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LendingHealthSnapshot {
+    pub account: u64,
+    pub eth_price: u64,
+    pub adjusted_collateral_value: i128,
+    pub debt_value: i128,
+    pub free_equity: i128,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LendingScanSnapshot {
+    pub eth_price: u64,
+    pub scanned: usize,
+    pub flagged: Vec<(u64, i128)>,
+}
+
+/// Apply a single [`LendingStep`] against `bridge`. `Init` (re)builds
+/// the bridge in place by replacing markets + clearing positions; all
+/// other steps require the bridge to already have a market and return
+/// an error if the underlying call fails. Always succeeds in producing
+/// a `LendingStepResult` whose `positions_after` snapshot reflects the
+/// post-step state (read-only steps still re-snapshot for honest DELTA).
+fn run_lending_step(
+    step: &LendingStep,
+    bridge: &mut Option<princeps_evm::LiveRethEvmBridge<()>>,
+) -> eyre::Result<LendingStepResult> {
+    use princeps_evm::LiveRethEvmBridge;
+    use princeps_lending::MarketId;
+    use rdk_clob::AccountId;
+    use rdk_funding::MarkPrice;
+    use std::collections::BTreeMap;
+
+    // `Init` resets the bridge whether or not one already existed.
+    if matches!(step, LendingStep::Init) {
+        let fresh = LiveRethEvmBridge::new((), crate::dev_chain_spec());
+        let market = crate::make_default_market();
+        fresh.with_markets_mut(|m| {
+            m.insert(market.id, market.clone());
+        });
+        *bridge = Some(fresh);
+        let positions_after = snapshot_positions(bridge.as_ref().unwrap());
+        return Ok(LendingStepResult {
+            step: step.clone(),
+            positions_after,
+            health: None,
+            scan: None,
+        });
+    }
+
+    // All non-init steps need a bridge.
+    let bridge = bridge.as_ref().ok_or_else(|| {
+        eyre::eyre!(
+            "lending step ran before `lending init` in the same scenario — \
+             the in-process walkthrough does not load state from disk."
+        )
+    })?;
+
+    let (health, scan) = match step {
+        LendingStep::Init => unreachable!(),
+        LendingStep::Deposit { account, amount } => {
+            bridge
+                .lending_deposit_collateral(AccountId(*account), MarketId(0), *amount)
+                .map_err(|e| eyre::eyre!("deposit failed: {e:?}"))?;
+            (None, None)
+        }
+        LendingStep::Borrow { account, amount, eth_price } => {
+            let mut prices = BTreeMap::new();
+            prices.insert(MarketId(0), (1u128, u128::from(*eth_price)));
+            bridge
+                .lending_borrow_unified(
+                    AccountId(*account),
+                    MarketId(0),
+                    *amount,
+                    MarkPrice(0),
+                    0,
+                    &prices,
+                )
+                .map_err(|e| eyre::eyre!("borrow failed: {e:?}"))?;
+            (None, None)
+        }
+        LendingStep::Health { account, eth_price } => {
+            let mut prices = BTreeMap::new();
+            prices.insert(MarketId(0), (1u128, u128::from(*eth_price)));
+            let mark = MarkPrice(0);
+            let inputs = bridge.compute_account_portfolio_inputs(
+                AccountId(*account),
+                mark,
+                0,
+                &prices,
+            );
+            let free = bridge.account_free_equity(AccountId(*account), mark, 0, &prices);
+            let healthy = bridge.account_is_healthy_portfolio(AccountId(*account), mark, 0, &prices);
+            (
+                Some(LendingHealthSnapshot {
+                    account: *account,
+                    eth_price: *eth_price,
+                    adjusted_collateral_value: inputs.lending_adjusted_collateral_value,
+                    debt_value: inputs.lending_debt_value,
+                    free_equity: free,
+                    healthy,
+                }),
+                None,
+            )
+        }
+        LendingStep::Scan { eth_price } => {
+            let mut prices = BTreeMap::new();
+            prices.insert(MarketId(0), (1u128, u128::from(*eth_price)));
+            let report = bridge.scan_unified(MarkPrice(0), 0, &prices);
+            (
+                None,
+                Some(LendingScanSnapshot {
+                    eth_price: *eth_price,
+                    scanned: report.scanned,
+                    flagged: report
+                        .flagged
+                        .into_iter()
+                        .map(|(acc, free)| (acc.0, free))
+                        .collect(),
+                }),
+            )
+        }
+        LendingStep::List => (None, None),
+    };
+
+    Ok(LendingStepResult {
+        step: step.clone(),
+        positions_after: snapshot_positions(bridge),
+        health,
+        scan,
+    })
+}
+
+fn snapshot_positions(
+    bridge: &princeps_evm::LiveRethEvmBridge<()>,
+) -> Vec<((u64, u32), princeps_lending::Position)> {
+    bridge
+        .positions_snapshot()
+        .into_iter()
+        .map(|((acc, mid), pos)| ((acc.0, mid.0), pos))
+        .collect()
 }
 
 /// Per-run dial overrides supplied by the CLI. Each field is optional;
@@ -524,6 +958,10 @@ fn run_embedded_v2(
 
     let mut results: Vec<StepResult> = Vec::with_capacity(scenario.steps.len());
     let mut failed = 0usize;
+    // Shared bridge for `LendingStep` walkthroughs. `Init` (re)builds
+    // it; other steps require it to already exist. Stays `None` for
+    // scenarios that don't use `LendingStep` at all.
+    let mut lending_bridge: Option<princeps_evm::LiveRethEvmBridge<()>> = None;
 
     for step in &scenario.steps {
         let target = try_parse_in_process(&step.command)
@@ -554,6 +992,15 @@ fn run_embedded_v2(
             InProcessTarget::IrmCurveDemo => {
                 let r = crate::irm_curve_demo::run_irm_curve_demo_structured();
                 results.push(StepResult::IrmCurve(r));
+            }
+            InProcessTarget::LendingStep(lstep) => {
+                match run_lending_step(&lstep, &mut lending_bridge) {
+                    Ok(r) => results.push(StepResult::LendingStep(r)),
+                    Err(e) => {
+                        eprintln!("step '{}' failed: {e}", step.explanation);
+                        failed += 1;
+                    }
+                }
             }
         }
     }
@@ -639,6 +1086,46 @@ fn render_v2_sections(
                     );
                 }
             }
+            StepResult::LendingStep(r) => match &r.step {
+                LendingStep::Init => {
+                    println!("    init       fresh USDC/ETH market, no positions");
+                }
+                LendingStep::Deposit { account, amount } => {
+                    println!("    deposit    account {account} → {amount} USDC collateral");
+                }
+                LendingStep::Borrow { account, amount, eth_price } => {
+                    println!(
+                        "    borrow     account {account} → {amount} ETH (oracle ETH={eth_price})"
+                    );
+                }
+                LendingStep::Health { account: _, eth_price: _ } => {
+                    let snap = r.health.as_ref().expect("health step must record health");
+                    let verdict = if snap.healthy { "HEALTHY" } else { "LIQUIDATABLE" };
+                    println!(
+                        "    health     account {} at ETH={} → adj_coll={}, debt={}, free={}, verdict={verdict}",
+                        snap.account,
+                        snap.eth_price,
+                        snap.adjusted_collateral_value,
+                        snap.debt_value,
+                        snap.free_equity,
+                    );
+                }
+                LendingStep::Scan { eth_price: _ } => {
+                    let snap = r.scan.as_ref().expect("scan step must record scan");
+                    println!(
+                        "    scan       at ETH={} → {} of {} flagged",
+                        snap.eth_price,
+                        snap.flagged.len(),
+                        snap.scanned
+                    );
+                }
+                LendingStep::List => {
+                    println!(
+                        "    list       {} open position(s)",
+                        r.positions_after.len()
+                    );
+                }
+            },
         }
     }
     println!();
@@ -680,6 +1167,34 @@ fn render_v2_sections(
                         note
                     );
                 }
+            }
+            StepResult::LendingStep(_) => {} // rendered once below, end-of-walkthrough state
+        }
+    }
+    // For walkthroughs, render a single final positions table after all
+    // per-step DELTAs. Cleaner than re-printing the (often-unchanged)
+    // table after every read-only step.
+    if let Some(last) = results.iter().rev().find_map(|r| match r {
+        StepResult::LendingStep(s) => Some(s),
+        _ => None,
+    }) {
+        println!("  Final positions after walkthrough:");
+        if last.positions_after.is_empty() {
+            println!("    (no open positions)");
+        } else {
+            println!(
+                "    {:>8}  {:>6}  {:>12}  {:>12}  {:>12}",
+                "Account", "Market", "Collateral", "ScaledDebt", "ScaledSupply"
+            );
+            println!(
+                "    {:>8}  {:>6}  {:>12}  {:>12}  {:>12}",
+                "-------", "------", "----------", "----------", "------------"
+            );
+            for ((acc, mid), pos) in &last.positions_after {
+                println!(
+                    "    {:>8}  {:>6}  {:>12}  {:>12}  {:>12}",
+                    acc, mid, pos.collateral_amount, pos.scaled_debt, pos.scaled_supply
+                );
             }
         }
     }
@@ -740,6 +1255,13 @@ fn evaluate_all_outcomes<'a>(
         StepResult::IrmCurve(d) => Some(d),
         _ => None,
     });
+    let walk_results: Vec<LendingStepResult> = results
+        .iter()
+        .filter_map(|r| match r {
+            StepResult::LendingStep(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
 
     scenario
         .expected_outcomes
@@ -767,6 +1289,13 @@ fn evaluate_all_outcomes<'a>(
                         "no IRM curve result available".to_string(),
                     ),
                 },
+                LendingCheck::WalkPositionCount(_)
+                | LendingCheck::WalkAccountCollateral { .. }
+                | LendingCheck::WalkAccountHasDebt { .. }
+                | LendingCheck::WalkHealthVerdict(_)
+                | LendingCheck::WalkScanFlaggedExact(_) => {
+                    evaluate_walk_check(&outcome.check, &walk_results)
+                }
             };
             (outcome, status)
         })
@@ -1086,6 +1615,10 @@ mod tests {
     fn lending_check_against_irm_returns_fail_with_helpful_message() {
         let r = crate::LendingDemoResult {
             eth_crash_price: 90,
+            ltv_bps: 9_500,
+            liquidation_penalty_bps: 500,
+            oracle_shock_bps: 0,
+            lending_oracle_price: 90,
             initial_collateral_usdc: 1000,
             borrowed_eth_units: 5,
             perp_position_size: 10,
@@ -1104,11 +1637,13 @@ mod tests {
 
     #[test]
     fn try_parse_in_process_returns_none_for_other_commands() {
-        assert!(try_parse_in_process("princeps lending init").is_none());
         assert!(try_parse_in_process("princeps info").is_none());
         assert!(try_parse_in_process("princeps lending-demo").is_none()); // missing arg
         assert!(try_parse_in_process("princeps lending-demo --eth-crash-price").is_none()); // missing value
         assert!(try_parse_in_process("# comment").is_none());
+        // `lending repay` is out of the v2 walkthrough surface — still
+        // routes through the sub-process fallback.
+        assert!(try_parse_in_process("princeps lending repay 1 50").is_none());
     }
 
     fn make_scenario(commands: &[&str]) -> Scenario {
@@ -1142,7 +1677,9 @@ mod tests {
     fn is_v2_eligible_false_when_any_step_is_subprocess() {
         let s = make_scenario(&[
             "princeps lending-demo --eth-crash-price 90",
-            "princeps lending init", // not in-process-able
+            // `lending repay` is outside the v2 walkthrough surface, so
+            // this still falls back to sub-process spawn.
+            "princeps lending repay 1 50",
         ]);
         assert!(!is_v2_eligible(&s));
     }
@@ -1158,6 +1695,10 @@ mod tests {
     fn fake_result(siloed: i128, unified: i128) -> crate::LendingDemoResult {
         crate::LendingDemoResult {
             eth_crash_price: 90,
+            ltv_bps: 9_500,
+            liquidation_penalty_bps: 500,
+            oracle_shock_bps: 0,
+            lending_oracle_price: 90,
             initial_collateral_usdc: 1000,
             borrowed_eth_units: 5,
             perp_position_size: 10,
@@ -1249,6 +1790,292 @@ mod tests {
         assert!(matches!(
             s.expected_outcomes[1].check,
             LendingCheck::SiloedFreeMax(-1)
+        ));
+    }
+
+    /// LendingStep parser tests — every walkthrough command shape.
+
+    #[test]
+    fn parse_lending_init_with_state_file() {
+        let t = try_parse_in_process(
+            "princeps lending init --state-file ./.princeps-walkthrough-state.json",
+        )
+        .expect("init parses");
+        assert!(matches!(
+            t,
+            InProcessTarget::LendingStep(LendingStep::Init)
+        ));
+    }
+
+    #[test]
+    fn parse_lending_deposit() {
+        let t = try_parse_in_process(
+            "princeps lending deposit 1 1000 --state-file ./x.json",
+        )
+        .expect("deposit parses");
+        match t {
+            InProcessTarget::LendingStep(LendingStep::Deposit { account, amount }) => {
+                assert_eq!(account, 1);
+                assert_eq!(amount, 1000);
+            }
+            other => panic!("expected Deposit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_lending_borrow_flag_order_independent() {
+        let a = try_parse_in_process(
+            "princeps lending borrow 1 200 --eth-price 1 --state-file ./x.json",
+        )
+        .expect("borrow parses (flag order A)");
+        let b = try_parse_in_process(
+            "princeps lending borrow 1 200 --state-file ./x.json --eth-price 1",
+        )
+        .expect("borrow parses (flag order B)");
+        for t in [a, b] {
+            match t {
+                InProcessTarget::LendingStep(LendingStep::Borrow {
+                    account,
+                    amount,
+                    eth_price,
+                }) => {
+                    assert_eq!(account, 1);
+                    assert_eq!(amount, 200);
+                    assert_eq!(eth_price, 1);
+                }
+                other => panic!("expected Borrow, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_lending_health_default_eth_price() {
+        // No --eth-price → default 1 (matches the CLI default).
+        let t = try_parse_in_process("princeps lending health 1 --state-file ./x.json")
+            .expect("health parses without --eth-price");
+        match t {
+            InProcessTarget::LendingStep(LendingStep::Health { account, eth_price }) => {
+                assert_eq!(account, 1);
+                assert_eq!(eth_price, 1);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_lending_scan_and_list() {
+        let s = try_parse_in_process(
+            "princeps lending scan --eth-price 2 --state-file ./x.json",
+        )
+        .expect("scan parses");
+        let l = try_parse_in_process("princeps lending list --state-file ./x.json")
+            .expect("list parses");
+        assert!(matches!(
+            s,
+            InProcessTarget::LendingStep(LendingStep::Scan { eth_price: 2 })
+        ));
+        assert!(matches!(
+            l,
+            InProcessTarget::LendingStep(LendingStep::List)
+        ));
+    }
+
+    #[test]
+    fn parse_lending_rejects_unknown_subcommand() {
+        // `repay` isn't in the v2 surface yet — fall back to v1 sub-process.
+        assert!(try_parse_in_process("princeps lending repay 1 50").is_none());
+        // Garbage args.
+        assert!(try_parse_in_process("princeps lending deposit one 1000").is_none());
+        // Missing positional.
+        assert!(try_parse_in_process("princeps lending deposit 1").is_none());
+        // Stray extra positional.
+        assert!(try_parse_in_process("princeps lending list 5").is_none());
+    }
+
+    /// End-to-end walkthrough execution: parser + runner + outcomes.
+
+    #[test]
+    fn walkthrough_runs_and_outcomes_pass() {
+        let commands = [
+            "princeps lending init --state-file ./.test-walk-state.json",
+            "princeps lending deposit 1 1000 --state-file ./.test-walk-state.json",
+            "princeps lending borrow 1 200 --eth-price 1 --state-file ./.test-walk-state.json",
+            "princeps lending health 1 --eth-price 1 --state-file ./.test-walk-state.json",
+            "princeps lending health 1 --eth-price 2 --state-file ./.test-walk-state.json",
+            "princeps lending scan --eth-price 2 --state-file ./.test-walk-state.json",
+            "princeps lending list --state-file ./.test-walk-state.json",
+        ];
+
+        let mut bridge: Option<princeps_evm::LiveRethEvmBridge<()>> = None;
+        let mut step_results: Vec<LendingStepResult> = Vec::new();
+        for cmd in commands {
+            match try_parse_in_process(cmd).expect("walkthrough commands all parse") {
+                InProcessTarget::LendingStep(s) => {
+                    let r = run_lending_step(&s, &mut bridge).expect("step runs");
+                    step_results.push(r);
+                }
+                other => panic!("unexpected target for {cmd}: {other:?}"),
+            }
+        }
+
+        // Final state should have exactly one position (account 1) with
+        // 1000 collateral + positive scaled_debt.
+        let last = step_results.last().unwrap();
+        assert_eq!(last.positions_after.len(), 1);
+        let ((acc, _), pos) = &last.positions_after[0];
+        assert_eq!(*acc, 1);
+        assert_eq!(pos.collateral_amount, 1000);
+        assert!(pos.scaled_debt > 0);
+
+        // Outcome checks via the public evaluate_walk_check path.
+        assert!(matches!(
+            evaluate_walk_check(&LendingCheck::WalkPositionCount(1), &step_results),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_walk_check(
+                &LendingCheck::WalkAccountCollateral { account: 1, amount: 1000 },
+                &step_results,
+            ),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_walk_check(
+                &LendingCheck::WalkAccountHasDebt { account: 1 },
+                &step_results,
+            ),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_walk_check(
+                &LendingCheck::WalkHealthVerdict("HEALTHY".to_string()),
+                &step_results,
+            ),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_walk_check(&LendingCheck::WalkScanFlaggedExact(0), &step_results),
+            OutcomeStatus::Pass
+        ));
+    }
+
+    #[test]
+    fn walkthrough_non_init_first_fails_clearly() {
+        let mut bridge: Option<princeps_evm::LiveRethEvmBridge<()>> = None;
+        let err = run_lending_step(
+            &LendingStep::Deposit { account: 1, amount: 100 },
+            &mut bridge,
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("lending init"),
+            "expected hint to mention init; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn walkthrough_check_account_mismatch_fails_with_observed_value() {
+        let mut bridge: Option<princeps_evm::LiveRethEvmBridge<()>> = None;
+        let mut step_results: Vec<LendingStepResult> = Vec::new();
+        for s in [
+            LendingStep::Init,
+            LendingStep::Deposit { account: 1, amount: 1000 },
+        ] {
+            step_results.push(run_lending_step(&s, &mut bridge).unwrap());
+        }
+        match evaluate_walk_check(
+            &LendingCheck::WalkAccountCollateral { account: 1, amount: 9999 },
+            &step_results,
+        ) {
+            OutcomeStatus::Fail(why) => assert!(why.contains("1000")),
+            _ => panic!("expected Fail"),
+        }
+        // Missing-account case.
+        match evaluate_walk_check(
+            &LendingCheck::WalkAccountCollateral { account: 42, amount: 0 },
+            &step_results,
+        ) {
+            OutcomeStatus::Fail(why) => assert!(why.contains("no open position")),
+            _ => panic!("expected Fail"),
+        }
+    }
+
+    #[test]
+    fn walkthrough_check_with_no_scan_step_fails() {
+        let mut bridge: Option<princeps_evm::LiveRethEvmBridge<()>> = None;
+        let r = run_lending_step(&LendingStep::Init, &mut bridge).unwrap();
+        let results = vec![r];
+        match evaluate_walk_check(&LendingCheck::WalkScanFlaggedExact(0), &results) {
+            OutcomeStatus::Fail(why) => assert!(why.contains("no scan step")),
+            _ => panic!("expected Fail"),
+        }
+    }
+
+    #[test]
+    fn is_v2_eligible_true_for_walkthrough_shape() {
+        let s = make_scenario(&[
+            "princeps lending init --state-file ./x.json",
+            "princeps lending deposit 1 1000 --state-file ./x.json",
+            "princeps lending borrow 1 200 --eth-price 1 --state-file ./x.json",
+            "princeps lending health 1 --eth-price 1 --state-file ./x.json",
+            "princeps lending scan --eth-price 1 --state-file ./x.json",
+            "princeps lending list --state-file ./x.json",
+        ]);
+        assert!(is_v2_eligible(&s));
+    }
+
+    #[test]
+    fn is_v2_eligible_false_when_walkthrough_mixed_with_subprocess() {
+        let s = make_scenario(&[
+            "princeps lending init --state-file ./x.json",
+            "princeps lending repay 1 50", // not v2-eligible
+        ]);
+        assert!(!is_v2_eligible(&s));
+    }
+
+    /// LendingStep walkthrough check serializes from JSON.
+    #[test]
+    fn walkthrough_check_round_trips() {
+        let json = r#"{
+            "name": "test",
+            "category": "walkthrough",
+            "description": "t",
+            "headline": "t",
+            "steps": [
+                {"explanation": "init", "command": "princeps lending init"}
+            ],
+            "expected_outcomes": [
+                {
+                    "name": "one-position",
+                    "description": "exactly one position lands",
+                    "check": {"walk_position_count": 1}
+                },
+                {
+                    "name": "alice-collat",
+                    "description": "alice deposited 1000",
+                    "check": {"walk_account_collateral": {"account": 1, "amount": 1000}}
+                },
+                {
+                    "name": "health",
+                    "description": "last health is HEALTHY",
+                    "check": {"walk_health_verdict": "HEALTHY"}
+                }
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).expect("parse");
+        assert_eq!(s.expected_outcomes.len(), 3);
+        assert!(matches!(
+            s.expected_outcomes[0].check,
+            LendingCheck::WalkPositionCount(1)
+        ));
+        assert!(matches!(
+            s.expected_outcomes[1].check,
+            LendingCheck::WalkAccountCollateral { account: 1, amount: 1000 }
+        ));
+        assert!(matches!(
+            s.expected_outcomes[2].check,
+            LendingCheck::WalkHealthVerdict(_)
         ));
     }
 

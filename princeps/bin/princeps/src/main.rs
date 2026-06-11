@@ -1093,7 +1093,7 @@ fn resolve_lending_state_path(user: Option<&PathBuf>) -> eyre::Result<PathBuf> {
         .join("lending-state.json"))
 }
 
-fn make_default_market() -> princeps_lending::Market {
+pub(crate) fn make_default_market() -> princeps_lending::Market {
     use princeps_lending::{AssetId, Bps, Index as LendingIndex, IrmParams, Market, MarketId};
     let mut market = Market::new(
         MarketId(0),
@@ -2749,7 +2749,7 @@ fn parse_socket_spec(spec: &str) -> eyre::Result<(IpAddr, u16)> {
 /// Minimal post-merge dev genesis. Chain ID 2600 mirrors the upstream
 /// reth custom-dev-node example so behaviour can be compared 1:1 if
 /// needed. Same shape `crates/evm` uses in its integration tests.
-fn dev_chain_spec() -> Arc<ChainSpec> {
+pub(crate) fn dev_chain_spec() -> Arc<ChainSpec> {
     let genesis_json = r#"{
         "nonce": "0x42",
         "timestamp": "0x0",
