@@ -37,23 +37,26 @@ princeps scenario list
 # Inspect one scenario without running it.
 princeps scenario show cross-margin-survival
 
-# Run the scenario: each step is spawned as a sub-process with
-# stdio inherited so output streams live. Wrapped with a headline
-# header, per-step separators, and a final verdict + CTA.
+# Run the scenario: v2-eligible scenarios (every step parses to
+# an in-process target — `lending-demo`, `irm-curve-demo`, or any
+# of the `lending` sub-commands the walkthrough exercises) dispatch
+# in-process and render the 5-section output contract (HEADLINE /
+# TIMELINE / DELTA / OUTCOMES / NEXT). The rare v1 scenario spawns
+# each step as a sub-process with stdio inherited.
 princeps scenario run cross-margin-survival
 
 # Pass --dry-run to print the step list without executing.
 princeps scenario run cross-margin-survival --dry-run
 ```
 
-Five scenarios ship today:
-- **`cross-margin-survival`** (stress, v2 no validator) — canonical prime broker thesis at 10% crash; ✓ all 4 outcomes verify.
-- **`cross-margin-edge`** (stress, v2 no validator) — mid-stress at 5% crash; ✓ all 5 outcomes verify.
-- **`cross-margin-fail`** (stress, v2 no validator) — 50% deep crash, unified still HEALTHY; ✓ all 3 outcomes verify.
-- **`lending-irm-curve`** (walkthrough, v2 no validator) — 11-point IRM curve sweep (0% → 100% utilization in 10% steps) using `princeps_lending::compute_borrow_rate`; surfaces the 80% kink + 11x slope-jump factor; ✓ all 5 outcomes verify.
-- `manual-lending-walkthrough` (walkthrough, v1 sub-process) — hands-on lending CLI walkthrough against a scenario-local state file.
+Five scenarios ship today (all v2 in-process):
+- **`cross-margin-survival`** (stress) — canonical prime broker thesis at 10% crash; ✓ all 4 outcomes verify.
+- **`cross-margin-edge`** (stress) — mid-stress at 5% crash; ✓ all 5 outcomes verify.
+- **`cross-margin-fail`** (stress) — 50% deep crash, unified still HEALTHY; ✓ all 3 outcomes verify.
+- **`lending-irm-curve`** (walkthrough) — 11-point IRM curve sweep (0% → 100% utilization in 10% steps) using `princeps_lending::compute_borrow_rate`; surfaces the 80% kink + 11x slope-jump factor; ✓ all 5 outcomes verify.
+- **`manual-lending-walkthrough`** (walkthrough) — hands-on `lending init / deposit / borrow / health / scan / list` walkthrough against a shared in-memory `LiveRethEvmBridge<()>`; `--state-file` is parsed and discarded so nothing is written to disk during a v2 run; ✓ all 5 outcomes verify.
 
-Dial flag on `scenario run`: pass `--eth-crash-price <N>` to override the value baked into any `lending-demo`-based scenario step. Lets a buyer ask "what changes if the crash were 80 instead of 90?" without editing the JSON.
+Dial flags on `scenario run`: `--eth-crash-price <N>` overrides any `lending-demo` step; `--ltv`, `--liquidation-penalty`, `--oracle-shock` tune the lending market; `--rounds` extends the per-tick walkthrough. Lets a buyer ask "what changes if the crash were 80 instead of 90?" without editing the JSON.
 
 ### Drive the underlying CLI directly
 
@@ -90,9 +93,9 @@ Per `fabrknt/website/SANDBOX-PATTERN.md`, every Fabrknt sandbox must ship five e
 
 | Element | Status | Notes |
 |---|---|---|
-| (1) Pre-baked scenarios | **present** | `scenarios/` directory with 3 scenarios (`cross-margin-survival`, `cross-margin-fail`, `manual-lending-walkthrough`). More to follow as oracle-stale and ADL-cascade behaviors get scripted. |
-| (2) Business-readable output | **v2 done for v2-eligible scenarios** | Scenarios whose steps are all in-process-eligible (currently: `cross-margin-survival`, `cross-margin-fail`) take the v2 path: in-process dispatch into `run_lending_demo_structured`, then HEADLINE (with ✓/⚠/unverified badge per `expected_outcomes` verification), TIMELINE, DELTA, OUTCOMES, NEXT. Both shipped v2 scenarios declare outcomes that verify ✓. Scenarios with sub-process steps (currently: `manual-lending-walkthrough`) keep the v1 sub-process passthrough; extending in-process dispatch to cover them is tracked in `fabrknt/website/SANDBOX-BACKLOG.md`. |
-| (3) Parameter dial | partial | `lending-demo --eth-crash-price <N>` already exposes the canonical dial. Per-step parameter overrides on `scenario run` (margin bps, oracle staleness) land in v2. |
+| (1) Pre-baked scenarios | **present** | `scenarios/` directory with 5 scenarios spanning the shared taxonomy (3 stress, 2 walkthrough). All five take the v2 path. |
+| (2) Business-readable output | **v2 done across all scenarios** | All five scenarios dispatch in-process into their respective `run_*_structured` entry points (`run_lending_demo_structured`, `run_irm_curve_demo_structured`, plus the per-step `LendingStep` runner for the walkthrough) and emit the full 5-section contract: HEADLINE (✓/⚠/unverified badge per `expected_outcomes` verification), TIMELINE, DELTA, OUTCOMES, NEXT. 22 outcomes verify ✓ across the five scenarios. |
+| (3) Parameter dial | **done** | Four CLI dials on `scenario run` surface the value-relevant knobs: `--eth-crash-price` (lending-demo crash mark), `--ltv`, `--liquidation-penalty`, `--oracle-shock`. Dials take precedence over scenario JSON params over compiled defaults. |
 | (4) Scenario replay | **present** | Each scenario file is a deterministic step list — re-running yields the same sub-process invocations. State persistence across steps is the responsibility of the underlying CLI (`lending` writes to `~/.princeps/lending-state.json`). |
 | (5) CTA | **done** | `scenario list` / `show` / `run` all render a three-option CTA footer (adopt engine / custom build / hosted access). |
 

@@ -89,9 +89,9 @@ Per `fabrknt/website/SANDBOX-PATTERN.md`, every Fabrknt sandbox must ship five e
 
 | Element | Status | Notes |
 |---|---|---|
-| (1) Pre-baked scenarios | **present** | `scenarios/` directory with 3 named scenarios (`cascade`, `single-block-cascade`, `calm-baseline`). 2 more pending (oracle stale, ADL trigger) once the JSON format extends to oracle observations. |
-| (2) Business-readable output | **v2 done for declared scenarios** | `scenario run` executes in-process and renders HEADLINE (with ✓/⚠/unverified badge), TIMELINE, ACCOUNT DELTA, OUTCOMES (per `expected_outcomes` declared in JSON), and NEXT. All three shipped scenarios declare outcomes that verify ✓. **Caveats**: per-block state isn't fully consistent because post-tick `TickReport` is not yet written back to the bridge (same accounts may be re-flagged each tick); oracle-driven cascades need JSON-format extension for oracle observations. Both tracked in `fabrknt/website/SANDBOX-BACKLOG.md`. |
-| (3) Parameter dial | partial | Margin params (initial / maintenance / liquidation fee bps) baked into scenario JSON are applied to the `LiquidationParams` at run time. CLI flag overrides on `scenario run` (per-invocation dial) pending. |
+| (1) Pre-baked scenarios | **present** | `scenarios/` directory with 7 named scenarios spanning the shared taxonomy: 5 stress (`cascade`, `single-block-cascade`, `threshold-margin`, `oracle-stale`, `adl-trigger`) + 1 walkthrough (`position-buildup`) + 1 baseline (`calm-baseline`). |
+| (2) Business-readable output | **v2 done across all scenarios** | `scenario run` executes in-process against a unit-provider `LiveRethEvmBridge<()>` and renders the full 5-section contract: HEADLINE (✓/⚠/unverified badge per `expected_outcomes` verification), TIMELINE, ACCOUNT DELTA, OUTCOMES, NEXT. Per-tick `TickReport` is written back to the bridge (funding settlements → collateral, liquidation closes → position=0, ADL records → counterparty position + PnL) so per-block state stays consistent. The chain-history JSON drives oracle observations directly via per-block `oracle: {set_price: N}` / `oracle: "clear"` ops; the runner reads `effective_mark` so the timeline surfaces `mark_source = "oracle"` when an index is installed. All 7 shipped scenarios declare outcomes that verify ✓ (45 outcomes total). |
+| (3) Parameter dial | **done** | Margin params (initial / maintenance / liquidation fee bps) baked into scenario JSON apply at run time. CLI dials on `scenario run` surface the canonical knobs: `--initial-margin-bps`, `--maintenance-margin-bps`, `--liquidation-fee-bps`, `--rounds`. |
 | (4) Scenario replay | **done** | `chain-history` (now via `scenarios/*.json` wrapper) is the replay format. Deterministic, bit-identical across runs. |
 | (5) CTA | **done** | `scenario list` / `show` / `run` all render a three-option CTA footer (adopt engine / custom build / hosted access). |
 
@@ -101,11 +101,11 @@ Per `fabrknt/website/SANDBOX-PATTERN.md`, every Fabrknt sandbox must ship five e
 2. ✅ Add the `scenario list` / `show` / `run` CLI surface.
 3. ✅ CTA footer on every scenario output.
 4. ✅ Embedded `scenario run` execution (in-process against a unit-provider `LiveRethEvmBridge<()>`).
-5. ⏳ v2: write post-tick `TickReport` (funding settlements / liquidation closes / ADL records) back to the bridge so per-block state stays consistent (currently the same accounts get re-flagged each block).
-6. ⏳ Surface CLI flag overrides on `scenario run` for in-run parameter dial (margin bps, oracle staleness, funding cap).
-7. ⏳ Extend the scenario JSON format to drive oracle observations directly, then add `oracle-stale` and `adl-trigger` scenarios.
+5. ✅ Write post-tick `TickReport` (funding settlements / liquidation closes / ADL records) back to the bridge so per-block state stays consistent.
+6. ✅ Surface CLI flag overrides on `scenario run` for in-run parameter dial (initial / maintenance / liquidation fee bps, rounds).
+7. ✅ Extend the scenario JSON format to drive oracle observations directly; `oracle-stale` and `adl-trigger` scenarios shipped.
 
-Implementation of remaining items tracked in the cross-engine Task #9.
+Remaining cross-engine work tracked in `fabrknt/website/SANDBOX-BACKLOG.md`.
 
 ## Build
 

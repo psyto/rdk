@@ -258,23 +258,20 @@ pub struct DialOverrides {
     pub liquidation_fee_bps: Option<u32>,
 }
 
-/// v1 embedded execution: actually run the scenario in-process and
+/// Embedded execution: actually run the scenario in-process and
 /// render the observed state. CLI [`DialOverrides`] take precedence
 /// over scenario JSON `params`, which in turn take precedence over
 /// the engine's compiled defaults.
 ///
 /// Constructs a `LiveRethEvmBridge<()>` (no Reth boot), applies the
-/// scenario's per-block trades and deposits via [`ChainHistoryApplier`],
-/// ticks [`OpenHlNode`] between events, and produces a headline +
-/// per-block timeline + before/after account delta.
-///
-/// Liquidation cascades require oracle observations (driven from
-/// outside the chain-history format); v1 surfaces account snapshots
-/// into the tick, but oracle ingest is not yet driven from the
-/// scenario JSON, so headline outcomes that depend on oracle (e.g.
-/// "Bob liquidated when oracle drops to 102") are reported as
-/// "curator claim" alongside the observed state. Oracle drive in the
-/// JSON format lands in v2.
+/// scenario's per-block trades, deposits, and oracle ops via
+/// [`ChainHistoryApplier`], ticks [`OpenHlNode`] between events, and
+/// produces a headline + per-block timeline + before/after account
+/// delta. Oracle observations are driven from the scenario JSON via
+/// the per-block `oracle: {set_price: N}` / `oracle: "clear"` field;
+/// the runner reads `effective_mark`, so the timeline surfaces
+/// `mark_source = "oracle"` when an index is installed and falls back
+/// to the CLOB midpoint otherwise.
 pub fn run_embedded(scenario: &Scenario, dials: &DialOverrides) -> eyre::Result<String> {
     // Build coordinator config: CLI dials take precedence over JSON
     // params over compiled defaults.
