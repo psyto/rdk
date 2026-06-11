@@ -83,6 +83,10 @@ pub enum OpenHlCheck {
     LiquidationsMin(usize),
     /// Assert total liquidation scan-hits is at most N.
     LiquidationsMax(usize),
+    /// Assert total ADL records (counter-party force-closes) across
+    /// all blocks is at least N. Use for scenarios that exercise the
+    /// insurance-fund + ADL path explicitly.
+    AdlRecordsMin(usize),
     /// Assert total fills produced across all blocks is at least N.
     FillsMin(usize),
     /// Assert total fills produced is at most N.
@@ -323,7 +327,14 @@ pub fn run_embedded(scenario: &Scenario, dials: &DialOverrides) -> eyre::Result<
             })
             .collect();
 
-        let (mark, mark_source) = match bridge.current_mark() {
+        // v2: prefer the bridge's `effective_mark`, which yields the
+        // installed oracle index when one is present (set this block
+        // or earlier via `HistoryBlock::oracle`) and falls back to
+        // the CLOB midpoint otherwise. Surface the source so the
+        // timeline shows when the oracle drove the cascade vs. when
+        // the book did.
+        let (mark, mark_source) = match bridge.effective_mark() {
+            Some(m) if bridge.oracle_index_price().is_some() => (m, "oracle"),
             Some(m) => (m, "clob"),
             None => (MarkPrice(100), "stub-empty-book"),
         };
@@ -493,6 +504,16 @@ pub fn evaluate_openhl_check(
             } else {
                 OutcomeStatus::Fail(format!(
                     "observed total liquidation scan-hits = {total_liquidations} (expected ≤ {max})"
+                ))
+            }
+        }
+        OpenHlCheck::AdlRecordsMin(min) => {
+            let total_adl: usize = timeline.iter().map(|b| b.adl_records).sum();
+            if total_adl >= *min {
+                OutcomeStatus::Pass
+            } else {
+                OutcomeStatus::Fail(format!(
+                    "observed total ADL records = {total_adl} (expected ≥ {min})"
                 ))
             }
         }
@@ -1075,6 +1096,106 @@ mod tests {
         let out = run_embedded(&s, &DialOverrides::default()).expect("ok");
         assert!(out.contains("HEADLINE ✓:"), "expected ✓ badge; got:\n{out}");
         assert!(out.contains("1 of 1 outcome(s) verified."));
+    }
+
+    /// Oracle JSON drive: a scenario whose `history` carries an
+    /// `oracle: {set_price: N}` op gets that mark picked up by the
+    /// timeline. The runner must select `effective_mark` (which
+    /// prefers the installed oracle) rather than the bare CLOB
+    /// midpoint, and surface `mark_source = "oracle"`.
+    #[test]
+    fn run_embedded_picks_up_oracle_set_price_from_history() {
+        let json = r#"{
+            "name": "oracle-drive-smoke",
+            "category": "stress",
+            "description": "Push an oracle price; the timeline should reflect it.",
+            "headline": "oracle drives mark above CLOB midpoint",
+            "params": {"rounds": 2},
+            "history": {
+                "blocks": [
+                    {
+                        "height": 1,
+                        "deposits": [{"account": 10, "amount": 1000}],
+                        "trades": [
+                            {"id": 1, "account": 10, "side": "Sell", "qty": 5, "kind": "Limit", "price": 90},
+                            {"id": 2, "account": 20, "side": "Buy",  "qty": 5, "kind": "Limit", "price": 80}
+                        ],
+                        "oracle": {"set_price": 150}
+                    }
+                ]
+            },
+            "expected_outcomes": [
+                {
+                    "name": "mark-tracks-oracle",
+                    "description": "Effective mark equals the installed oracle index, not the CLOB midpoint.",
+                    "check": {"final_mark_min": 150}
+                }
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).expect("parse");
+        let out = run_embedded(&s, &DialOverrides::default()).expect("ok");
+        // Oracle 150 dominates the CLOB midpoint of 85 → final mark = 150.
+        assert!(out.contains("HEADLINE ✓:"), "expected ✓ badge; got:\n{out}");
+        assert!(
+            out.contains("oracle"),
+            "expected mark_source = \"oracle\"; got:\n{out}"
+        );
+    }
+
+    /// Oracle clear at a later block flips the timeline's mark_source
+    /// from "oracle" back to "clob" (the stale-aggregate path).
+    #[test]
+    fn run_embedded_clears_oracle_then_falls_back_to_clob() {
+        let json = r#"{
+            "name": "oracle-clear-smoke",
+            "category": "stress",
+            "description": "Install an oracle then clear it.",
+            "headline": "oracle clears → CLOB midpoint takes over",
+            "params": {"rounds": 3},
+            "history": {
+                "blocks": [
+                    {
+                        "height": 1,
+                        "deposits": [{"account": 10, "amount": 1000}],
+                        "trades": [
+                            {"id": 1, "account": 10, "side": "Sell", "qty": 5, "kind": "Limit", "price": 90},
+                            {"id": 2, "account": 20, "side": "Buy",  "qty": 5, "kind": "Limit", "price": 80}
+                        ],
+                        "oracle": {"set_price": 150}
+                    },
+                    {
+                        "height": 2,
+                        "oracle": "clear"
+                    }
+                ]
+            },
+            "expected_outcomes": [
+                {
+                    "name": "mark-falls-to-clob",
+                    "description": "Final mark equals the CLOB midpoint after the oracle clears.",
+                    "check": {"final_mark_max": 85}
+                }
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).expect("parse");
+        let out = run_embedded(&s, &DialOverrides::default()).expect("ok");
+        assert!(out.contains("HEADLINE ✓:"), "expected ✓ badge; got:\n{out}");
+    }
+
+    /// `AdlRecordsMin` reads from the timeline's per-block adl_records
+    /// sum, not from the `adl_fired` boolean.
+    #[test]
+    fn evaluate_openhl_check_adl_records_min() {
+        let mut timeline = fake_timeline(0, 0, 100);
+        timeline[0].adl_records = 3;
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::AdlRecordsMin(2), &[], &timeline),
+            OutcomeStatus::Pass
+        ));
+        assert!(matches!(
+            evaluate_openhl_check(&OpenHlCheck::AdlRecordsMin(5), &[], &timeline),
+            OutcomeStatus::Fail(_)
+        ));
     }
 
     #[test]

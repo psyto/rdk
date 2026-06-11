@@ -1,0 +1,58 @@
+{
+  "name": "adl-trigger",
+  "category": "stress",
+  "description": "One long (10) opens against one short maker (40) at entry 110; both stay healthy at block 1's stub mark (100). At block 2 the oracle index price prints 30 — a 73% drop. The long is now deeply underwater (collateral 50, mark-to-mark loss 80 per contract), and the CLOB book is empty (the maker order was already fully consumed), so the close-loop has no liquidity to absorb the long. The Underwater close kicks the residual into the insurance fund and ADL force-closes the maker counterparty at the haircut price. Use this scenario to see the insurance-fund + ADL path fire on a single-position, no-liquidity oracle shock — the textbook reason ADL exists.",
+  "headline": "Oracle drop from 110 → 30 with an empty book: the long is liquidated Underwater and the maker short is force-closed via ADL.",
+  "params": {
+    "rounds": 3,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 200,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 50},
+          {"account": 40, "amount": 300}
+        ],
+        "trades": [
+          {"id": 1001, "account": 40, "side": "Sell", "qty": 1, "kind": "Limit", "price": 110},
+          {"id": 1002, "account": 10, "side": "Buy",  "qty": 1, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 2,
+        "oracle": {"set_price": 30}
+      }
+    ]
+  },
+  "expected_outcomes": [
+    {
+      "name": "two-accounts",
+      "description": "Long (10) and maker short (40) — exactly two trading accounts after the chain history applies.",
+      "check": {"final_account_count": 2}
+    },
+    {
+      "name": "long-is-liquidated",
+      "description": "The 73% oracle drop flags the long for liquidation.",
+      "check": {"liquidations_min": 1}
+    },
+    {
+      "name": "maker-is-adl-closed",
+      "description": "With no resting bids to absorb the close, ADL force-closes the maker short.",
+      "check": {"adl_records_min": 1}
+    },
+    {
+      "name": "long-position-zeroed",
+      "description": "Account 10's long is fully closed by the liquidation.",
+      "check": {"account_position": {"account": 10, "expected": 0}}
+    },
+    {
+      "name": "maker-position-zeroed",
+      "description": "Account 40's short is fully closed by ADL.",
+      "check": {"account_position": {"account": 40, "expected": 0}}
+    }
+  ]
+}

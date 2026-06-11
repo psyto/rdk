@@ -1,0 +1,75 @@
+{
+  "name": "oracle-stale",
+  "category": "stress",
+  "description": "Three traders open long perp positions at entry 110 against one maker (40 sells 50 @ 110). An oracle index price is published at 110 — so even though the CLOB midpoint later settles to 91 via mark-book orders Buy 90 / Sell 92, `effective_mark` reads the oracle and the longs remain HEALTHY. At block 4 the oracle aggregate goes stale: the bridge clears its cached index, `effective_mark` falls back to the CLOB midpoint 91, and the cascade fires. Accounts 10 / 20 / 30 are underwater, the close-loop liquidates them, and the maker counterparty (40) takes the ADL hit when the underwater closes run out of book liquidity. Use this scenario to see what happens when an oracle feed silently drops out from under a live position book.",
+  "headline": "Oracle protects the book at 110; once the feed goes stale at block 4 the CLOB midpoint takes over and the longs cascade.",
+  "params": {
+    "rounds": 5,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 200,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 90},
+          {"account": 20, "amount": 100},
+          {"account": 30, "amount": 400},
+          {"account": 40, "amount": 300}
+        ],
+        "trades": [
+          {"id": 1001, "account": 40, "side": "Sell", "qty": 50, "kind": "Limit", "price": 110}
+        ],
+        "oracle": {"set_price": 110}
+      },
+      {
+        "height": 2,
+        "trades": [
+          {"id": 1003, "account": 10, "side": "Buy", "qty": 10, "kind": "Market"},
+          {"id": 1004, "account": 20, "side": "Buy", "qty": 10, "kind": "Market"},
+          {"id": 1005, "account": 30, "side": "Buy", "qty": 30, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 3,
+        "trades": [
+          {"id": 2001, "account": 1, "side": "Buy",  "qty": 1, "kind": "Limit", "price": 90},
+          {"id": 2002, "account": 2, "side": "Sell", "qty": 1, "kind": "Limit", "price": 92}
+        ]
+      },
+      {
+        "height": 4,
+        "oracle": "clear"
+      }
+    ]
+  },
+  "expected_outcomes": [
+    {
+      "name": "four-trading-accounts",
+      "description": "Four trading accounts exist after the chain history applies (mark-book accounts 1 / 2 don't deposit).",
+      "check": {"final_account_count": 4}
+    },
+    {
+      "name": "longs-cascade-once-oracle-clears",
+      "description": "The three under-collateralized longs (10 / 20 / 30) are flagged by the scanner once the oracle clears at block 4.",
+      "check": {"liquidations_min": 3}
+    },
+    {
+      "name": "maker-counterparty-adl-closed",
+      "description": "The maker short (40) is force-closed via ADL when the underwater longs run out of book liquidity.",
+      "check": {"adl_records_min": 1}
+    },
+    {
+      "name": "maker-position-zeroed",
+      "description": "Account 40's short is fully absorbed by ADL.",
+      "check": {"account_position": {"account": 40, "expected": 0}}
+    },
+    {
+      "name": "final-mark-is-clob-midpoint",
+      "description": "After the oracle clears, `effective_mark` falls back to the CLOB midpoint (Buy 90 / Sell 92 → 91).",
+      "check": {"final_mark_max": 91}
+    }
+  ]
+}

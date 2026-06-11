@@ -80,8 +80,10 @@ pub struct ChainHistory {
 }
 
 /// One block's worth of events. Trades apply first, then
-/// deposits — same order as [`crate::seed_fixture::replay`] uses
-/// for the all-at-once seed.
+/// deposits, then the optional oracle op — same order as
+/// [`crate::seed_fixture::replay`] uses for the all-at-once seed,
+/// with oracle ingest grafted at the end so the post-tick scan
+/// sees both the new positions and the new mark.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryBlock {
     /// 1-indexed block height these events belong to. Events
@@ -96,6 +98,36 @@ pub struct HistoryBlock {
     /// [`crate::seed_fixture::DepositOp`].
     #[serde(default)]
     pub deposits: Vec<DepositOp>,
+    /// Optional oracle op applied at the start of this block,
+    /// after trades + deposits but before the tick's
+    /// liquidation scan. Use this to drive `oracle-stale` and
+    /// `adl-trigger` style scenarios where the cascade's pivot
+    /// is an oracle index price change rather than a CLOB
+    /// midpoint shift. Omit on blocks where the oracle index
+    /// shouldn't move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<OracleOp>,
+}
+
+/// One oracle observation injected by the chain-history fixture.
+///
+/// Externally-tagged so authors write either
+/// `"oracle": {"set_price": 102}` or `"oracle": "clear"` in the
+/// JSON. `Clear` simulates the Stage 17q stale-aggregate eviction
+/// path — the bridge's cached oracle index goes away and
+/// `effective_mark()` falls back to the CLOB midpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OracleOp {
+    /// Push a fresh oracle index price, mirroring what
+    /// `coordinator.tick` would do after aggregating publisher
+    /// observations under
+    /// [`rdk_oracle::OracleParams::aggregate_max_age_secs`].
+    SetPrice(u64),
+    /// Clear the bridge's cached oracle index, mirroring the
+    /// stale-aggregate eviction path. Forces subsequent ticks to
+    /// fall back to the CLOB midpoint.
+    Clear,
 }
 
 /// Loaded + indexed chain-history. Wrap in `Arc<ChainHistoryApplier>`
@@ -194,6 +226,19 @@ impl ChainHistoryApplier {
         for d in &block.deposits {
             let _ = bridge.deposit(ClobAccountId(d.account), d.amount);
         }
+        // Oracle op goes last so the next tick's scan sees the
+        // updated effective_mark on top of any positions opened
+        // in this same block. SetPrice / Clear mirror
+        // `bin/openhl reth-devnet`'s post-tick handling of the
+        // coordinator's `OracleIngestResult` (Stages 17o / 17q):
+        // an installed price is the canonical mark; a cleared
+        // cache falls back to the CLOB midpoint.
+        if let Some(op) = &block.oracle {
+            match op {
+                OracleOp::SetPrice(p) => bridge.set_oracle_index_price(*p),
+                OracleOp::Clear => bridge.clear_oracle_index_price(),
+            }
+        }
         Ok(Some((block.trades.len(), total_fills, block.deposits.len())))
     }
 }
@@ -255,8 +300,8 @@ mod tests {
     fn applier_rejects_duplicate_heights() {
         let history = ChainHistory {
             blocks: vec![
-                HistoryBlock { height: 5, trades: vec![], deposits: vec![] },
-                HistoryBlock { height: 5, trades: vec![], deposits: vec![] },
+                HistoryBlock { height: 5, trades: vec![], deposits: vec![], oracle: None },
+                HistoryBlock { height: 5, trades: vec![], deposits: vec![], oracle: None },
             ],
         };
         let err = ChainHistoryApplier::new(history).expect_err("dup must fail");
@@ -287,6 +332,7 @@ mod tests {
                     price: Some(110),
                 }],
                 deposits: vec![DepositOp { account: 40, amount: 500 }],
+                oracle: None,
             }],
         };
         let applier = ChainHistoryApplier::new(history).expect("construct");
@@ -307,5 +353,98 @@ mod tests {
 
         // Subsequent heights past the history → no-op.
         assert!(applier.apply_for_height(&bridge, 4).unwrap().is_none());
+    }
+
+    /// Oracle SetPrice on a HistoryBlock pushes through to the
+    /// bridge's cached oracle index. `effective_mark` then prefers
+    /// the oracle over any CLOB midpoint.
+    #[test]
+    fn apply_for_height_installs_oracle_set_price() {
+        let chain_spec = Arc::new(ChainSpec::default());
+        let bridge = LiveRethEvmBridge::new((), chain_spec);
+
+        let history = ChainHistory {
+            blocks: vec![HistoryBlock {
+                height: 1,
+                trades: vec![],
+                deposits: vec![],
+                oracle: Some(OracleOp::SetPrice(102)),
+            }],
+        };
+        let applier = ChainHistoryApplier::new(history).expect("construct");
+
+        assert!(bridge.oracle_index_price().is_none());
+        applier.apply_for_height(&bridge, 1).unwrap().expect("ran");
+        assert_eq!(bridge.oracle_index_price(), Some(102));
+    }
+
+    /// Oracle Clear after a SetPrice evicts the cached index so
+    /// `effective_mark` falls back to the CLOB midpoint — the
+    /// stale-aggregate path the `oracle-stale` scenario depends on.
+    #[test]
+    fn apply_for_height_clears_oracle() {
+        let chain_spec = Arc::new(ChainSpec::default());
+        let bridge = LiveRethEvmBridge::new((), chain_spec);
+
+        let history = ChainHistory {
+            blocks: vec![
+                HistoryBlock {
+                    height: 1,
+                    trades: vec![],
+                    deposits: vec![],
+                    oracle: Some(OracleOp::SetPrice(110)),
+                },
+                HistoryBlock {
+                    height: 2,
+                    trades: vec![],
+                    deposits: vec![],
+                    oracle: Some(OracleOp::Clear),
+                },
+            ],
+        };
+        let applier = ChainHistoryApplier::new(history).expect("construct");
+
+        applier.apply_for_height(&bridge, 1).unwrap().expect("set");
+        assert_eq!(bridge.oracle_index_price(), Some(110));
+        applier.apply_for_height(&bridge, 2).unwrap().expect("clear");
+        assert!(bridge.oracle_index_price().is_none());
+    }
+
+    /// JSON authors should be able to write the oracle op in either
+    /// of the two natural shapes documented in the README:
+    /// `{"set_price": 102}` (object) or `"clear"` (string).
+    #[test]
+    fn oracle_op_round_trips_through_serde() {
+        let json = r#"{
+            "blocks": [
+                {
+                    "height": 1,
+                    "oracle": {"set_price": 102}
+                },
+                {
+                    "height": 2,
+                    "oracle": "clear"
+                },
+                {
+                    "height": 3
+                }
+            ]
+        }"#;
+        let h: ChainHistory = serde_json::from_str(json).expect("parse");
+        assert_eq!(h.blocks.len(), 3);
+        assert!(matches!(h.blocks[0].oracle, Some(OracleOp::SetPrice(102))));
+        assert!(matches!(h.blocks[1].oracle, Some(OracleOp::Clear)));
+        assert!(h.blocks[2].oracle.is_none());
+
+        // And the inverse — old chain-history files (no oracle field)
+        // still parse cleanly. Same case as block 3 above, but isolated
+        // so a future renaming of the field shows up as a single failure.
+        let legacy_json = r#"{
+            "blocks": [
+                {"height": 1, "trades": [], "deposits": []}
+            ]
+        }"#;
+        let h: ChainHistory = serde_json::from_str(legacy_json).expect("legacy parse");
+        assert!(h.blocks[0].oracle.is_none());
     }
 }
