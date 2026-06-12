@@ -1,10 +1,41 @@
-# openhl
+# openhl — EVM Perp Sandbox
 
-**EVM Perp Sandbox engine.** A deterministic, Reth + Malachite L1 implementation of perpetual-futures mechanics, designed to make perp DEX behavior explorable before committing to an implementation.
+**See how a perp DEX behaves under stress — without spinning up a real one.**
 
-This is the engine behind Fabrknt's [EVM Perp Sandbox](https://fabrknt.com/evm-perp.html). Per `fabrknt/website/CONCEPT.md`, the sandbox exists so that engineering teams, researchers, and product owners can study how a perp system behaves under stress — liquidation cascades, oracle staleness, funding extremes, ADL — by running scenarios rather than reading code.
+`openhl` is a runnable reference implementation of perpetual-futures mechanics on EVM. You hand it a scenario (a 5-trader liquidation cascade, an oracle going stale, a deep ETH crash), and ~50 ms later it prints back a structured **HEADLINE → TIMELINE → DELTA → OUTCOMES → NEXT** report with every declared outcome verified ✓ or ⚠. No deployment, no validator boot, no UI.
 
-## What it is
+## What you can do in 5 minutes
+
+If you have a few minutes for a cold cargo build of Reth + Malachite + openhl, run it locally:
+
+```bash
+git clone https://github.com/psyto/rdk
+cd rdk/openhl
+cargo run -q -p openhl -- scenario run cascade
+```
+
+That runs the canonical liquidation cascade (5 traders, mark drops from 110 → 96, scanner flags 2 underwater longs, write-back loop closes them + their maker counterparties via ADL) end-to-end. 10 declared outcomes verify ✓ before the prompt comes back.
+
+**Expect:** ~5-15 minutes for the first `cargo run` (cold compile of Reth + Malachite + the openhl workspace pulls a lot of crates and fills ~5-15 GB under `target/`); ~50 ms per subsequent `scenario run` once the binary is built. The pinned toolchain (Rust 1.95.0) auto-installs via `rust-toolchain.toml`.
+
+If you want the value first and the build second, [**`docs/sample-output.md`**](docs/sample-output.md) embeds the exact `cascade` output verbatim — no clone or build required.
+
+## Who this is for
+
+- **Perp DEX builders** validating exchange mechanics before writing their full system.
+- **Infra researchers** comparing liquidation / ADL / oracle / funding behavior across execution surfaces and risk models.
+- **Product owners** who want to answer "what changes if maintenance margin tightens from 2% to 5%?" without reading code — flip the `--maintenance-margin-bps` dial and re-run.
+- **Hackathon teams** who want a working conceptual scaffold for an EVM perp engine instead of starting from zero.
+
+If you fit any of those, the [EVM Perp Sandbox landing page](https://fabrknt.com/evm-perp.html) is the product-facing companion to this repo.
+
+## What `openhl` is NOT
+
+- Not a production exchange. Not deployed. No fee capture, no governance, no token.
+- Not a turnkey "white-label exchange" — there is no operator dashboard, no front-end, no KYC.
+- Not pedagogy. The depth-and-learning surface for Reth and the broader Rust Ethereum stack lives at RethLab; `openhl` is the product-facing sandbox engine.
+
+## What's under the hood
 
 `openhl` composes:
 
@@ -14,12 +45,6 @@ This is the engine behind Fabrknt's [EVM Perp Sandbox](https://fabrknt.com/evm-p
 - An integration coordinator (`OpenHlNode::tick`) that runs the per-block routine in one deterministic order: oracle refresh → liquidation scan → ADL absorption → vault mark-to-market → funding settlement.
 
 Architecture detail lives in `docs/architecture.md`. Determinism rules (no `SystemTime::now`, no `HashMap` iteration order, no `rand`) are enforced by `unsafe_code = forbid` plus dependency review.
-
-## What it is NOT
-
-- Not a production exchange. Not deployed. No fee capture, no governance, no token.
-- Not a turnkey "white-label exchange" — there is no operator dashboard, no front-end, no KYC.
-- Not pedagogy. The depth-and-learning surface for Reth and the broader Rust Ethereum stack lives at RethLab; `openhl` is the product-facing sandbox engine.
 
 ## How to explore (today)
 
