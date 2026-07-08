@@ -1,18 +1,46 @@
-# rdk — Reth DeFi Kit
+# rdk — build a DeFi L1 on Reth
 
-Ready-made DeFi L1 stack: **Reth/REVM (execution) + Malachite (BFT consensus) + DeFi primitives**.
+**Complete, tested reference implementations of DeFi L1s on Reth + Malachite** — a perp DEX
+(OpenHL) and a prime broker (Princeps) — plus the shared kit of primitives behind them.
 
-A monorepo hosting:
+Want to see how a real perpetuals exchange or prime broker works as its *own* Reth-based L1 —
+consensus, EVM precompiles, orderbook, funding, liquidation, settlement, wired end-to-end? This is a
+working, **590-test** reference you can read and run. Built the way Reth ships: reusable `rdk-*`
+crates + node binaries on top.
 
-- **`crates/`** — the kit itself: reusable DeFi L1 primitives (CLOB, funding, vault, liquidation, clearing, oracle, types, codec) consumable by any Reth+Malachite-based L1.
-- **`openhl/`** — EVM Perp Sandbox engine. Reth+Malachite L1 that makes perp DEX behavior explorable. The engine behind Fabrknt's [EVM Perp Sandbox](https://fabrknt.com/evm-perp.html). See `openhl/README.md`.
-- **`princeps/`** — EVM Prime Broker Sandbox engine. Reth+Malachite L1 unifying lending + perps + (future) options under one shared risk engine. The engine behind Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/evm-prime-broker.html). See `princeps/README.md`.
+## The reference implementations
 
-## Why a kit
+- **`openhl/` — a Hyperliquid-shape perp DEX, as its own L1.** Reth (EVM execution) + Malachite (BFT
+  consensus) + on-chain CLOB, funding, and liquidation via custom precompiles. A complete, explorable
+  perp DEX you can run locally. → [`openhl/README.md`](openhl/README.md) · powers Fabrknt's
+  [EVM Perp Sandbox](https://fabrknt.com/evm-perp.html)
+- **`princeps/` — a prime broker, as its own L1.** The same substrate, unifying lending + perps +
+  (future) options under one shared risk engine. → [`princeps/README.md`](princeps/README.md) ·
+  powers Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/evm-prime-broker.html)
 
-Both OpenHL (perp DEX) and Princeps (prime broker) need the same L1 substrate (Reth EVM + Malachite consensus + custom precompile patterns) and the same trading primitives (orderbook matching, funding computation, collateral liquidation, settlement). Forking openhl into princeps and developing in parallel produced massive duplication. The kit factors the shared layer once so each app focuses on its own integration (precompile set, consensus hooks, node wiring) and product-specific crates (e.g., princeps-lending, princeps-portfolio).
+## The kit behind them — `crates/`
 
-This mirrors how Reth itself ships: a single repo with reusable `reth-*` crates and the `reth` binary on top.
+Both apps need the same substrate and the same trading primitives, so the shared layer is factored
+once: `rdk-*` crates any Reth+Malachite L1 can consume.
+
+| crate | what it does |
+|---|---|
+| `clob` | central-limit orderbook matching engine |
+| `funding` | funding-rate computation |
+| `vault` | share-based collateral pooling |
+| `liquidation` | margin math + insurance fund + scanner + ADL |
+| `clearing` | settlement |
+| `oracle` | signed-observation aggregation + circuit breaker |
+| `types` · `codec` | shared data structures + wire codec |
+
+### Why one repo (not three)
+
+OpenHL (perp DEX) and Princeps (prime broker) need the same substrate (Reth EVM + Malachite consensus
++ custom precompile patterns) and the same trading primitives (matching, funding, liquidation,
+settlement). Forking one into the other produced massive duplication; the kit factors the shared
+layer once so each app focuses on its own integration (precompile set, consensus hooks, node wiring)
+and product-specific crates (e.g. `princeps-lending`, `princeps-portfolio`). **This mirrors how Reth
+itself ships: one repo, reusable `reth-*` crates, and binaries on top.**
 
 ## Structure
 
