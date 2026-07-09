@@ -12,6 +12,11 @@ serde = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+arc-swap = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name    = "read_contention"
+harness = false

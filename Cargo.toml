@@ -43,6 +43,9 @@ rdk-liquidation = { path = "crates/liquidation" }
 rdk-vault       = { path = "crates/vault" }
 rdk-clearing    = { path = "crates/clearing" }
 
+# --- concurrency / benchmarking (dev) ---
+arc-swap        = "1.7"
+
 # --- OpenHL app crates ---
 openhl-evm         = { path = "openhl/crates/evm" }
 openhl-consensus   = { path = "openhl/crates/consensus" }
