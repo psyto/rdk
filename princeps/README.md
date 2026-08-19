@@ -83,7 +83,7 @@ princeps reth-devnet --rounds 20
 
 Adjacent binaries:
 
-- `princeps-lending-rpc-server` — read-only HTTP JSON-RPC over an in-process bridge with 5 pre-seeded accounts. The fastest way to see prime broker mechanics from outside Rust.
+- `princeps-lending-rpc-server` — HTTP JSON-RPC over an in-process bridge, **plus a browser demo of cross-protocol margin** at `http://localhost:8080`. A trader enters a market-neutral book (ETH lent on Aave, hedged with a short ETH perp on Hyperliquid); the page shows each venue liquidating its own siloed leg while Princeps holds the netted book — every Princeps number computed live by the real `princeps-portfolio` kernel via `GET /portfolio/health`. Includes a replay of the real Aug 5 2024 ETH crash path. The fastest way to see prime broker mechanics from outside Rust. See [`bin/lending-rpc-server/README.md`](bin/lending-rpc-server/README.md).
 - `princeps-liquidator-bot` — sample keeper demonstrating the liquidation flow.
 - `princeps-faucet` — devnet ETH faucet (operator-mode artifact, used by `docs/operator-manual/faucet-deployment.md`).
 

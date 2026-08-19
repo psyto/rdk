@@ -1,13 +1,18 @@
-//! HTTP RPC server for Princeps lending state (Stage 24d).
+//! HTTP RPC + demo UI server for Princeps cross-protocol margin (Stage 24d).
 //!
-//! Read-only JSON endpoints over an in-process `LiveRethEvmBridge`,
-//! mirroring what a future production deployment would expose alongside
-//! Reth's own JSON-RPC. v0 scope: in-process bridge with seeded demo
-//! data so any reader can `curl localhost:8080/lending/markets` after
-//! `cargo run --bin princeps-lending-rpc-server` without booting a
+//! JSON endpoints over an in-process `LiveRethEvmBridge`, plus a single-page
+//! UI that drives the real `princeps-portfolio` kernel from a browser. Mirrors
+//! what a future production deployment would expose alongside Reth's own
+//! JSON-RPC. v0 scope: in-process bridge with seeded demo data so any reader
+//! can `curl localhost:8080/lending/markets` — or open `http://localhost:8080`
+//! — after `cargo run --bin princeps-lending-rpc-server`, without booting a
 //! validator.
 //!
 //! ### Endpoints
+//!
+//! - `GET /`
+//!   → the cross-protocol margin demo UI (`ui/index.html`, read from disk at
+//!     request time so the frontend iterates without a rebuild).
 //!
 //! - `GET /lending/markets`
 //!   → `[{ market_id, market }]` for every registered market.
@@ -17,9 +22,15 @@
 //!     position, sorted lexicographically by `(account_id, market_id)`.
 //!
 //! - `GET /lending/health?account=N&perp_mark=M&perp_im_bps=B&coll_price=C&debt_price=D`
-//!   → `{ account, free_equity, is_healthy, portfolio_inputs }`
-//!     Builds a single-market price map `{ MarketId(0) => (C, D) }` for
-//!     the v0 single-market case.
+//!   → `{ account, free_equity, is_healthy, portfolio_inputs }` for a seeded
+//!     account. Builds a single-market price map `{ MarketId(0) => (C, D) }`.
+//!
+//! - `GET /portfolio/health?perp_collateral=..&perp_unrealized_pnl=..&perp_im_req=..&lending_adjusted_collateral_value=..&lending_debt_value=..`
+//!   → `{ free_equity, is_healthy, portfolio_inputs }` for an arbitrary,
+//!     caller-supplied cross-protocol book. Stateless: nothing is seeded, the
+//!     caller's numbers run straight through `princeps_portfolio::compute_free_equity`.
+//!     This is what the UI calls, so a trader's own book — not demo data —
+//!     drives the engine.
 //!
 //! - `GET /lending/scan?perp_mark=M&perp_im_bps=B&coll_price=C&debt_price=D`
 //!   → `UnifiedScanReport` from `LiveRethEvmBridge::scan_unified`.
@@ -28,8 +39,9 @@
 //!
 //! ```bash
 //! cargo run --bin princeps-lending-rpc-server
+//! open http://localhost:8080                       # the demo UI
 //! curl http://localhost:8080/lending/markets
-//! curl 'http://localhost:8080/lending/scan?perp_mark=0&perp_im_bps=0&coll_price=1&debt_price=2'
+//! curl 'http://localhost:8080/portfolio/health?perp_collateral=1000&perp_unrealized_pnl=900&perp_im_req=100&lending_adjusted_collateral_value=950&lending_debt_value=1800'
 //! ```
 //!
 //! ### Scope
@@ -37,7 +49,9 @@
 //! v0 in-process bridge. Real-world deployment serves data from a
 //! running `reth-devnet`; v1 will replace this binary's local bridge
 //! setup with a connection to a long-lived node via an internal IPC
-//! handle. The endpoint shapes don't change.
+//! handle. The endpoint shapes don't change. See `README.md` in this
+//! crate for the UI's honesty model (real kernel, published venue
+//! rulebooks, real historical price path, Princeps-can-lose).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -45,7 +59,8 @@ use std::sync::Arc;
 use alloy_genesis::Genesis;
 use axum::{
     extract::{Query, State},
-    response::Json,
+    http::StatusCode,
+    response::{Html, Json},
     routing::get,
     Router,
 };
@@ -86,10 +101,12 @@ async fn main() -> eyre::Result<()> {
     let state = Arc::new(bridge);
 
     let app = Router::new()
+        .route("/", get(serve_ui))
         .route("/lending/markets", get(list_markets))
         .route("/lending/positions", get(list_positions))
         .route("/lending/health", get(get_health))
         .route("/lending/scan", get(get_scan))
+        .route("/portfolio/health", get(get_portfolio_health))
         .with_state(state);
 
     let addr = format!("{}:{}", args.host, args.port);
@@ -136,6 +153,15 @@ struct HealthResponse {
     portfolio_inputs: PortfolioInputs,
 }
 
+/// Response for an arbitrary (stateless) cross-protocol book run directly
+/// through the real `princeps-portfolio` kernel — no seeded account.
+#[derive(Serialize)]
+struct PortfolioHealthResponse {
+    free_equity: i128,
+    is_healthy: bool,
+    portfolio_inputs: PortfolioInputs,
+}
+
 // ============================================================
 // Query parameter shapes
 // ============================================================
@@ -159,6 +185,18 @@ struct HealthQuery {
     perp_im_bps: u32,
     coll_price: u64,
     debt_price: u64,
+}
+
+/// Raw `PortfolioInputs` fields for a caller-supplied cross-protocol book.
+/// Signed i64 on the wire (serde_urlencoded rejects i128); cast to i128 in
+/// the handler. i64 range covers any realistic demo book.
+#[derive(Debug, Deserialize)]
+struct PortfolioQuery {
+    perp_collateral: i64,
+    perp_unrealized_pnl: i64,
+    perp_im_req: i64,
+    lending_adjusted_collateral_value: i64,
+    lending_debt_value: i64,
 }
 
 // ============================================================
@@ -206,6 +244,36 @@ async fn get_health(
         is_healthy,
         portfolio_inputs: inputs,
     })
+}
+
+/// Run an arbitrary caller-supplied cross-protocol book (a lending leg + a
+/// perp leg) straight through the REAL `princeps-portfolio` kernel. Stateless:
+/// nothing is seeded, the caller's numbers are the numbers. This is what the
+/// UI calls so a trader's own book — not demo data — drives the engine.
+async fn get_portfolio_health(Query(q): Query<PortfolioQuery>) -> Json<PortfolioHealthResponse> {
+    let inputs = PortfolioInputs {
+        perp_collateral: i128::from(q.perp_collateral),
+        perp_unrealized_pnl: i128::from(q.perp_unrealized_pnl),
+        perp_im_req: i128::from(q.perp_im_req),
+        lending_adjusted_collateral_value: i128::from(q.lending_adjusted_collateral_value),
+        lending_debt_value: i128::from(q.lending_debt_value),
+    };
+    let free_equity = princeps_portfolio::compute_free_equity(&inputs);
+    let is_healthy = princeps_portfolio::is_healthy(&inputs);
+    Json(PortfolioHealthResponse {
+        free_equity,
+        is_healthy,
+        portfolio_inputs: inputs,
+    })
+}
+
+/// Serve the single-page UI. Read from disk at request time (relative to the
+/// crate manifest) so the frontend can be iterated without rebuilding.
+async fn serve_ui() -> Result<Html<String>, (StatusCode, String)> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/index.html");
+    std::fs::read_to_string(path)
+        .map(Html)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("UI not found at {path}: {e}")))
 }
 
 async fn get_scan(

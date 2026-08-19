@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Princeps — Cross-protocol margin</title>
+<style>
+  :root{
+    --bg:#080b0e; --surface:#111a20; --surface2:#16212a; --line:#22323b; --line2:#31454f;
+    --text:#d4dde1; --muted:#7c8c94; --gold:#e6b34d; --gold-dim:#a8802e;
+    --red:#f2585d; --red-bg:rgba(242,88,93,.13); --green:#45bb8b; --green-bg:rgba(69,187,139,.13);
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.5;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1140px;margin:0 auto;padding:28px clamp(16px,3vw,36px) 60px}
+  a{color:var(--gold)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface2);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    border-bottom:1px solid var(--line);padding-bottom:14px}
+  .brand{font-family:var(--mono);font-size:13px;letter-spacing:.26em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  .brand span{opacity:.5;padding:0 .5em}
+  .live{font-family:var(--mono);font-size:11px;color:var(--muted);display:flex;align-items:center;gap:7px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+  .dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+  h1{font-size:clamp(22px,3.2vw,32px);line-height:1.12;letter-spacing:-.02em;margin:22px 0 6px;font-weight:680;max-width:24ch}
+  h1 em{font-style:normal;color:var(--gold)}
+  .lede{color:var(--muted);max-width:66ch;margin:0 0 22px;font-size:15px}
+
+  .grid{display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}
+  @media(max-width:820px){.grid{grid-template-columns:1fr}}
+
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:18px}
+  .card h2{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+    font-weight:600;margin:0 0 14px}
+
+  .field{margin-bottom:13px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+  .field .row{display:flex;gap:8px;align-items:center}
+  input[type=number]{width:100%;background:var(--surface2);border:1px solid var(--line2);color:var(--text);
+    font-family:var(--mono);font-size:14px;padding:8px 10px;border-radius:7px;font-variant-numeric:tabular-nums}
+  input[type=number]:focus{outline:2px solid var(--gold);outline-offset:1px;border-color:var(--gold)}
+  .unit{font-family:var(--mono);font-size:12px;color:var(--muted);white-space:nowrap}
+  .leg-title{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--text);margin:4px 0 10px;padding-top:12px;border-top:1px dashed var(--line)}
+  .leg-title:first-child{border-top:none;padding-top:0}
+  .rulebook{font-size:11px;color:var(--muted);margin-top:4px}
+  .rulebook a{color:var(--gold-dim)}
+
+  /* price control */
+  .pricebar{background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:16px 18px;margin-bottom:18px}
+  .pricehead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+  .pricehead .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .pricehead .val{font-family:var(--mono);font-size:30px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .pricehead .chg{font-family:var(--mono);font-size:14px;font-weight:600;padding:2px 8px;border-radius:999px}
+  .chg.up{color:var(--green);background:var(--green-bg)} .chg.dn{color:var(--red);background:var(--red-bg)} .chg.flat{color:var(--muted)}
+  .replay-time{font-family:var(--mono);font-size:12px;color:var(--gold);font-variant-numeric:tabular-nums}
+  .replay-btn{margin-left:auto;font-family:var(--mono);font-size:12px;font-weight:600;color:var(--bg);
+    background:var(--gold);border:none;border-radius:8px;padding:8px 13px;cursor:pointer}
+  .replay-btn:hover{filter:brightness(1.06)} .replay-btn:active{transform:translateY(1px)}
+  .replay-btn[disabled]{opacity:.55;cursor:default}
+  .replay-btn:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:4px;
+    background:linear-gradient(90deg,var(--red),var(--line2) 50%,var(--green));outline:none;margin:6px 0 0}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;
+    background:var(--surface);border:2px solid var(--gold);cursor:grab}
+  input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--surface);border:2px solid var(--gold);cursor:grab}
+  .ends{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:5px}
+
+  .venues{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:680px){.venues{grid-template-columns:1fr}}
+  .venue{background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:16px;position:relative;overflow:hidden}
+  .venue.today{border-top:3px solid var(--red)}
+  .venue.princeps{border-top:3px solid var(--gold)}
+  .vh{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:4px}
+  .vname{font-family:var(--mono);font-size:13px;font-weight:600}
+  .vtag{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+  .status{font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.11em;text-transform:uppercase;padding:3px 8px;border-radius:6px}
+  .status.ok{color:var(--green);background:var(--green-bg)} .status.dead{color:var(--red);background:var(--red-bg)}
+  .metric{display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:7px 0;border-top:1px dashed var(--line);font-size:12.5px}
+  .metric:first-of-type{border-top:none}
+  .metric .k{color:var(--muted)} .metric .v{font-family:var(--mono);font-weight:600;font-variant-numeric:tabular-nums}
+  .v.pos{color:var(--green)} .v.neg{color:var(--red)}
+  .feq{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:6px}
+  .engine-badge{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:var(--gold-dim);margin-top:10px;display:flex;align-items:center;gap:6px}
+  .venue .flash{position:absolute;inset:0;background:var(--red-bg);opacity:0;pointer-events:none}
+  .venue.flash .flash{animation:fl .5s ease}
+  @keyframes fl{0%{opacity:0}22%{opacity:1}100%{opacity:0}}
+
+  .verdict{margin-top:18px;background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:16px 18px;font-size:14px}
+  .verdict .headline{font-size:16px;font-weight:600;margin-bottom:4px}
+  .verdict.win{border-left:3px solid var(--green)} .verdict.lose{border-left:3px solid var(--red)} .verdict.neutral{border-left:3px solid var(--line2)}
+  .foot{margin-top:24px;border-top:1px solid var(--line);padding-top:14px;font-size:11.5px;color:var(--muted);line-height:1.6;max-width:82ch}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Princeps<span>/</span>Cross-protocol&nbsp;margin</div>
+    <div class="live"><span class="dot" id="live-dot"></span><span id="live-txt">connecting to engine…</span></div>
+  </header>
+
+  <h1>Your book is <em>one risk unit here.</em> Today it lives in two.</h1>
+  <p class="lede">A market-neutral book — ETH collateral lent on Aave, hedged with a short ETH perp on Hyperliquid.
+    Each venue prices only its own leg. Princeps runs the whole book through one risk engine. Move ETH and watch
+    which venue liquidates a position that, netted, is barely exposed. Every <b>Princeps</b> number below is computed
+    live by the real <code>princeps-portfolio</code> kernel over HTTP — not this page.</p>
+
+  <div class="grid">
+    <!-- INPUTS -->
+    <div class="card">
+      <h2>Your book</h2>
+      <div class="leg-title">Aave — lending leg</div>
+      <div class="field"><label>ETH collateral (supplied)</label>
+        <div class="row"><input type="number" id="coll_eth" value="10" step="0.5"><span class="unit">ETH</span></div></div>
+      <div class="field"><label>USDC debt (borrowed)</label>
+        <div class="row"><input type="number" id="debt_usdc" value="15000" step="500"><span class="unit">USDC</span></div></div>
+      <div class="rulebook">Liquidation threshold <input type="number" id="aave_lt" value="83" step="0.5" style="width:64px;display:inline-block;padding:3px 6px">%
+        &nbsp;·&nbsp;<a href="https://aave.com/docs/aave-v3/concepts/reserve" target="_blank" rel="noopener">Aave V3 WETH, published</a></div>
+
+      <div class="leg-title">Hyperliquid — perp hedge</div>
+      <div class="field"><label>Short ETH perp (size)</label>
+        <div class="row"><input type="number" id="perp_size" value="10" step="0.5"><span class="unit">ETH short</span></div></div>
+      <div class="field"><label>Entry price</label>
+        <div class="row"><input type="number" id="perp_entry" value="2000" step="10"><span class="unit">USDC</span></div></div>
+      <div class="field"><label>Margin posted</label>
+        <div class="row"><input type="number" id="perp_margin" value="2000" step="100"><span class="unit">USDC</span></div></div>
+      <div class="rulebook">Initial margin <input type="number" id="hl_im" value="2" step="0.5" style="width:56px;display:inline-block;padding:3px 6px">%
+        · maint. <input type="number" id="hl_mm" value="1" step="0.5" style="width:56px;display:inline-block;padding:3px 6px">%
+        &nbsp;·&nbsp;<a href="https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers" target="_blank" rel="noopener">HL ETH, published</a></div>
+    </div>
+
+    <!-- OUTPUT -->
+    <div>
+      <div class="pricebar">
+        <div class="pricehead">
+          <span class="lbl">ETH mark</span>
+          <span class="val" id="price">$2,000</span>
+          <span class="chg flat" id="chg">0.0%</span>
+          <span class="replay-time" id="replay-time"></span>
+          <button class="replay-btn" id="replay-btn">▶ Replay Aug 5 2024</button>
+        </div>
+        <input type="range" id="slider" min="-45" max="90" step="0.5" value="0" aria-label="ETH price move %">
+        <div class="ends"><span id="end-lo">−45%</span><span id="end-mid">entry</span><span id="end-hi">+90%</span></div>
+      </div>
+
+      <div class="venues">
+        <section class="venue today" id="v-aave"><div class="flash"></div>
+          <div class="vh"><span class="vname">Aave</span><span class="status ok" id="aave-status">Healthy</span></div>
+          <div class="vtag">sees the lending leg only</div>
+          <div class="metric"><span class="k">Adj. collateral</span><span class="v" id="aave-coll">—</span></div>
+          <div class="metric"><span class="k">Debt</span><span class="v" id="aave-debt">—</span></div>
+          <div class="feq" id="aave-feq">—</div>
+        </section>
+
+        <section class="venue today" id="v-hl"><div class="flash"></div>
+          <div class="vh"><span class="vname">Hyperliquid</span><span class="status ok" id="hl-status">Healthy</span></div>
+          <div class="vtag">sees the perp leg only</div>
+          <div class="metric"><span class="k">Margin + PnL</span><span class="v" id="hl-eq">—</span></div>
+          <div class="metric"><span class="k">Maint. req</span><span class="v" id="hl-mm">—</span></div>
+          <div class="feq" id="hl-feq">—</div>
+        </section>
+
+        <section class="venue princeps" id="v-pr"><div class="flash"></div>
+          <div class="vh"><span class="vname">Princeps</span><span class="status ok" id="pr-status">Healthy</span></div>
+          <div class="vtag">one unified account</div>
+          <div class="metric"><span class="k">Lending free</span><span class="v" id="pr-lend">—</span></div>
+          <div class="metric"><span class="k">Perp free</span><span class="v" id="pr-perp">—</span></div>
+          <div class="feq" id="pr-feq">—</div>
+          <div class="engine-badge"><span class="dot" id="pr-dot" style="width:6px;height:6px"></span>free_equity from real kernel</div>
+        </section>
+      </div>
+
+      <div class="verdict neutral" id="verdict">
+        <div class="headline" id="verdict-h">Move ETH to see the divergence.</div>
+        <div id="verdict-b"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>Honest by construction.</b> Aave &amp; Hyperliquid panels apply each venue's own <em>published</em> risk parameters
+    (liquidation threshold, initial/maintenance margin — editable above, sourced) to its own leg. The Princeps panel sends the
+    assembled book to <code>GET /portfolio/health</code> and shows the <code>free_equity</code> returned by the real
+    <code>princeps-portfolio::compute_free_equity</code> kernel — the same code path a validator runs. No invented verdicts.
+    Princeps can lose: push ETH far enough up and even the unified account liquidates (condition shown in red). Illustrative book, not investment advice.
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $=function(id){return document.getElementById(id)};
+
+  // Real ETH/USDT hourly closes, Aug 4 00:00 → Aug 6 00:00 UTC 2024 (Binance klines).
+  // The Aug 5 yen-carry-unwind crash: $2,924 high → $2,228 low, −23.8%.
+  var PATH=[2914.39,2907.27,2920.51,2915.78,2901.94,2915.36,2918.05,2893.24,2906.27,2912.54,2915.83,2914.22,2923.57,2910.83,2864.4,2826.98,2810.8,2700.19,2729.78,2757.55,2752.42,2730.48,2722.17,2688.92,2526.81,2319.25,2334.61,2312.72,2336.8,2311.7,2268.21,2357.55,2325.44,2317.64,2272.78,2290.57,2228.21,2337.78,2403.57,2450.8,2453.59,2469.62,2374.41,2404.9,2436.87,2428.5,2452.79,2419.59,2540.91];
+  var PATH_START=Date.UTC(2024,7,4,0,0,0); // Aug 4 2024 00:00 UTC, 1h steps
+
+  var els={
+    price:$("price"),chg:$("chg"),slider:$("slider"),
+    aStatus:$("aave-status"),aColl:$("aave-coll"),aDebt:$("aave-debt"),aFeq:$("aave-feq"),vAave:$("v-aave"),
+    hStatus:$("hl-status"),hEq:$("hl-eq"),hMm:$("hl-mm"),hFeq:$("hl-feq"),vHl:$("v-hl"),
+    pStatus:$("pr-status"),pLend:$("pr-lend"),pPerp:$("pr-perp"),pFeq:$("pr-feq"),vPr:$("v-pr"),pDot:$("pr-dot"),
+    verdict:$("verdict"),vH:$("verdict-h"),vB:$("verdict-b"),
+    liveDot:$("live-dot"),liveTxt:$("live-txt"),
+    replayTime:$("replay-time"),replayBtn:$("replay-btn"),
+    endLo:$("end-lo"),endMid:$("end-mid"),endHi:$("end-hi")
+  };
+  var inp={coll:$("coll_eth"),debt:$("debt_usdc"),lt:$("aave_lt"),
+           size:$("perp_size"),entry:$("perp_entry"),margin:$("perp_margin"),im:$("hl_im"),mm:$("hl_mm")};
+  var num=function(el){var v=parseFloat(el.value);return isFinite(v)?v:0};
+  var money=function(v){var n=Math.round(v);var s=n<0?"−":"";n=Math.abs(n);
+    return s+"$"+n.toString().replace(/\B(?=(\d{3})+(?!\d))/g,",")};
+  var flash=function(v){v.classList.remove("flash");void v.offsetWidth;v.classList.add("flash")};
+
+  // assemble the book at a given ETH mark → the exact PortfolioInputs fields
+  function book(mark){
+    var coll=num(inp.coll),debt=num(inp.debt),lt=num(inp.lt)/100;
+    var size=num(inp.size),entry=num(inp.entry),margin=num(inp.margin),im=num(inp.im)/100,mm=num(inp.mm)/100;
+    var adjColl=coll*mark*lt;               // Aave: haircut collateral
+    var debtVal=debt;                        // USDC debt, price 1
+    var perpPnl=size*(entry-mark);           // short: gains as mark falls
+    var notional=size*mark;
+    var perpIm=notional*im;                  // HL initial margin req
+    var perpMm=notional*mm;                  // HL maintenance req
+    return {mark:mark,adjColl:adjColl,debtVal:debtVal,margin:margin,perpPnl:perpPnl,perpIm:perpIm,perpMm:perpMm,notional:notional};
+  }
+
+  var seq=0, engineOk=false;
+  function updateEnds(base){
+    els.endLo.textContent="−45%  (ETH "+money(base*0.55)+")";
+    els.endMid.textContent="entry "+money(base);
+    els.endHi.textContent="+90%  (ETH "+money(base*1.9)+")";
+  }
+  function render(){
+    var base=num(inp.entry)||2000;
+    updateEnds(base);
+    var pct=parseFloat(els.slider.value);
+    var mark=Math.round(base*(1+pct/100));
+    var b=book(mark);
+
+    els.price.textContent=money(mark);
+    els.chg.textContent=(pct>0?"+":"")+pct.toFixed(1)+"%";
+    els.chg.className="chg "+(pct>0.05?"up":pct<-0.05?"dn":"flat");
+
+    // --- Aave siloed (lending leg only): free = adjColl - debt ---
+    var aFree=b.adjColl-b.debtVal, aDead=aFree<0;
+    els.aColl.textContent=money(b.adjColl); els.aDebt.textContent=money(b.debtVal);
+    els.aFeq.textContent=money(aFree); els.aFeq.className="feq "+(aDead?"neg":"pos");
+    setStatus(els.aStatus,aDead); toggleDead(els.vAave,aDead,"aave");
+
+    // --- HL siloed (perp leg only): free = margin + pnl - maint ---
+    var hEqv=b.margin+b.perpPnl, hFree=hEqv-b.perpMm, hDead=hFree<0;
+    els.hEq.textContent=money(hEqv); els.hMm.textContent=money(b.perpMm);
+    els.hFeq.textContent=money(hFree); els.hFeq.className="feq "+(hDead?"neg":"pos");
+    setStatus(els.hStatus,hDead); toggleDead(els.vHl,hDead,"hl");
+
+    // --- Princeps unified: REAL engine via /portfolio/health ---
+    var lendFree=b.adjColl-b.debtVal, perpFree=b.margin+b.perpPnl-b.perpIm;
+    els.pLend.textContent=money(lendFree); els.pLend.className="v "+(lendFree<0?"neg":"pos");
+    els.pPerp.textContent=money(perpFree); els.pPerp.className="v "+(perpFree<0?"neg":"pos");
+
+    var q=new URLSearchParams({
+      perp_collateral:Math.round(b.margin),
+      perp_unrealized_pnl:Math.round(b.perpPnl),
+      perp_im_req:Math.round(b.perpIm),
+      lending_adjusted_collateral_value:Math.round(b.adjColl),
+      lending_debt_value:Math.round(b.debtVal)
+    });
+    var mine=++seq;
+    fetch("/portfolio/health?"+q.toString()).then(function(r){return r.json()}).then(function(d){
+      if(mine!==seq)return; // drop stale
+      engineOk=true; setLive(true);
+      var pDead=!d.is_healthy;
+      els.pFeq.textContent=money(d.free_equity); els.pFeq.className="feq "+(pDead?"neg":"pos");
+      setStatus(els.pStatus,pDead); toggleDead(els.vPr,pDead,"pr");
+      els.pDot.className="dot"+(pDead?" off":"");
+      verdict(aDead,hDead,pDead,d.free_equity,pct);
+    }).catch(function(){ if(mine!==seq)return; engineOk=false; setLive(false);
+      els.pFeq.textContent="engine ⚠"; els.pStatus.textContent="offline"; });
+  }
+
+  function setStatus(el,dead){el.textContent=dead?"Liquidated":"Healthy";el.className="status "+(dead?"dead":"ok")}
+  var deadState={};
+  function toggleDead(card,dead,key){ if(dead&&!deadState[key])flash(card); deadState[key]=dead; }
+  function setLive(ok){ els.liveDot.className="dot"+(ok?"":" off");
+    els.liveTxt.textContent=ok?"engine live · princeps-portfolio kernel":"engine offline"; }
+
+  function verdict(aDead,hDead,pDead,pFree,pct){
+    var v=els.verdict,h=els.vH,b=els.vB;
+    if(pDead){
+      v.className="verdict lose";
+      h.textContent="Even Princeps liquidates here.";
+      b.innerHTML="At +"+pct.toFixed(0)+"% the short's loss outruns the collateral backing it — the unified account is underwater too "
+        +"("+money(pFree)+"). <b>Princeps can lose.</b> This is the falsifiable edge: the demo is an experiment, not an ad.";
+    } else if(aDead||hDead){
+      v.className="verdict win";
+      var who=aDead?"Aave":"Hyperliquid", other=aDead?"the Hyperliquid short's gain":"the Aave collateral";
+      h.textContent=who+" liquidates this leg. Princeps doesn't.";
+      b.innerHTML=who+" prices only its own silo and force-closes a position that is barely exposed net. Princeps nets "
+        +other+" against it inside one account — <b>free equity "+money(pFree)+", healthy.</b> Same book, one venue kills it, the other keeps it.";
+    } else {
+      v.className="verdict neutral";
+      h.textContent="Both legs alive — net exposure ≈ 0.";
+      b.innerHTML="Drag ETH down until Aave's collateral haircut bites, or up until the short's margin runs out. "
+        +"Watch a siloed venue liquidate what Princeps holds.";
+    }
+  }
+
+  // ---- replay of the real Aug 5 2024 ETH path ----
+  var replaying=false, replayTimer=null;
+  var MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  function fmtTime(i){
+    var d=new Date(PATH_START+i*3600*1000);
+    var hh=("0"+d.getUTCHours()).slice(-2);
+    return MONTHS[d.getUTCMonth()]+" "+d.getUTCDate()+" "+hh+":00 UTC";
+  }
+  function stopReplay(){
+    if(replayTimer){clearInterval(replayTimer);replayTimer=null;}
+    replaying=false; els.replayBtn.disabled=false; els.replayBtn.textContent="▶ Replay Aug 5 2024";
+  }
+  function startReplay(){
+    // calibrate the book to the event (entry at the Aug-4 pre-crash level).
+    // debt sized so the Aave leg breaches through the real Aug-5 trough.
+    inp.entry.value=2914; inp.coll.value=10; inp.debt.value=20500; inp.size.value=10; inp.margin.value=3000;
+    replaying=true; els.replayBtn.disabled=false; els.replayBtn.textContent="■ Stop replay";
+    var i=0;
+    replayTimer=setInterval(function(){
+      if(i>=PATH.length){ stopReplay(); return; }
+      var pct=(PATH[i]/2914-1)*100; pct=Math.max(-45,Math.min(90,pct));
+      els.slider.value=pct;
+      els.replayTime.textContent=fmtTime(i);
+      render();
+      i++;
+    },230);
+  }
+
+  // wire up
+  els.slider.addEventListener("input",function(){ if(replaying)stopReplay(); render(); });
+  Object.keys(inp).forEach(function(k){inp[k].addEventListener("input",function(){
+    if(replaying){stopReplay(); els.replayTime.textContent="";}
+    render();
+  })});
+  els.replayBtn.addEventListener("click",function(){ if(replaying)stopReplay(); else startReplay(); });
+  render();
+})();
+</script>
+</body>
+</html>
