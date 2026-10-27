@@ -27,7 +27,7 @@ If you want the value first and the build second, [**`docs/sample-output.md`**](
 - **Product owners** who want to answer "what changes if maintenance margin tightens from 2% to 5%?" without reading code — flip the `--maintenance-margin-bps` dial and re-run.
 - **Hackathon teams** who want a working conceptual scaffold for an EVM perp engine instead of starting from zero.
 
-If you fit any of those, the [EVM Perp Sandbox landing page](https://fabrknt.com/evm-perp.html) is the product-facing companion to this repo.
+If you fit any of those, the [EVM Perp Sandbox landing page](https://fabrknt.com/reactor/evm-perp) is the product-facing companion to this repo.
 
 ## What `openhl` is NOT
 

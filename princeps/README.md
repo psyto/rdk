@@ -2,7 +2,7 @@
 
 **EVM Prime Broker Sandbox engine.** A deterministic, Reth + Malachite L1 implementation of a unified cross-margin prime broker (lending + perps + future options + structured products on one shared risk engine), designed to make shared-risk system behavior explorable before commitment.
 
-This is the engine behind Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/evm-prime-broker.html). Per `fabrknt/website/CONCEPT.md`, the sandbox exists so engineering teams, risk officers, and product owners can study how shared-risk systems behave under stress — cross-margin liquidations, bad-debt cascades, insurance-fund socialization, oracle stress — by running scenarios rather than reading code.
+This is the engine behind Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/reactor/evm-prime-broker). Per `fabrknt/website/CONCEPT.md`, the sandbox exists so engineering teams, risk officers, and product owners can study how shared-risk systems behave under stress — cross-margin liquidations, bad-debt cascades, insurance-fund socialization, oracle stress — by running scenarios rather than reading code.
 
 ## Two surfaces
 

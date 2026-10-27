@@ -13,10 +13,11 @@ crates + node binaries on top.
 - **`openhl/` — a Hyperliquid-shape perp DEX, as its own L1.** Reth (EVM execution) + Malachite (BFT
   consensus) + on-chain CLOB, funding, and liquidation via custom precompiles. A complete, explorable
   perp DEX you can run locally. → [`openhl/README.md`](openhl/README.md) · powers Fabrknt's
-  [EVM Perp Sandbox](https://fabrknt.com/evm-perp.html)
+  [EVM Perp Sandbox](https://fabrknt.com/reactor/evm-perp); built step by step in the Build OpenHL
+  courses on [Fabrknt Dojo](https://fabrknt.com/dojo/courses)
 - **`princeps/` — a prime broker, as its own L1.** The same substrate, unifying lending + perps +
   (future) options under one shared risk engine. → [`princeps/README.md`](princeps/README.md) ·
-  powers Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/evm-prime-broker.html)
+  powers Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/reactor/evm-prime-broker)
 
 ## The kit behind them — `crates/`
 
