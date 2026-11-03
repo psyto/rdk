@@ -13,7 +13,7 @@
 //! same observation slice arrive at byte-identical results.
 
 use crate::types::{AggregationError, DEVIATION_SCALE, OracleParams};
-use rdk_funding::IndexPrice;
+use rdk_units::IndexPrice;
 
 /// Deterministic median of a non-empty slice of prices.
 ///

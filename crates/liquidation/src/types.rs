@@ -14,8 +14,8 @@
 //! integers scaled by [`MARGIN_SCALE`] (basis points, 10⁴) for margin
 //! ratios.
 
-use rdk_clob::{AccountId, Qty, Side};
-use rdk_funding::{MarkPrice, Notional, PositionSize};
+use rdk_units::{AccountId, Qty, Side};
+use rdk_units::{MarkPrice, Notional, PositionSize};
 use serde::{Deserialize, Serialize};
 
 /// Scale factor for [`MarginRatio`] — basis points (1 bp = 0.01%).

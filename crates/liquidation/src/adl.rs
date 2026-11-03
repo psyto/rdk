@@ -62,8 +62,8 @@ use crate::compute::{
     account_equity, close_order_spec, notional_value, saturate_i128_to_i64, unrealized_pnl,
 };
 use crate::types::{AccountSnapshot, CloseOrderSpec, MARGIN_SCALE};
-use rdk_clob::AccountId;
-use rdk_funding::MarkPrice;
+use rdk_units::AccountId;
+use rdk_units::MarkPrice;
 
 /// ADL ranking score. Higher means earlier force-close.
 ///
@@ -223,7 +223,7 @@ pub fn execute_adl(
 mod tests {
     use super::*;
     use crate::types::AccountSnapshot;
-    use rdk_funding::{Notional, PositionSize};
+    use rdk_units::{Notional, PositionSize};
     use proptest::prelude::*;
 
     fn snapshot(account: u64, size: i64, entry: u64, collateral: i64) -> AccountSnapshot {

@@ -6,40 +6,11 @@
 
 use core::fmt;
 
-use serde::{Deserialize, Serialize};
-
-/// Account identifier. Opaque to the CLOB; chain integration maps these to
-/// EVM addresses, validator addresses, or whatever the chain uses.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct AccountId(pub u64);
+pub use rdk_units::{AccountId, Price, Qty, Side};
 
 /// Sequential order identifier. Caller allocates; the book doesn't generate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderId(pub u64);
-
-/// Price in minor units. For a USDC market, `Price(1_000_000) = $1.00`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Price(pub u64);
-
-/// Quantity in minor units.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Qty(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Side {
-    Buy,
-    Sell,
-}
-
-impl Side {
-    #[must_use]
-    pub const fn opposite(self) -> Self {
-        match self {
-            Self::Buy => Self::Sell,
-            Self::Sell => Self::Buy,
-        }
-    }
-}
 
 /// Order type — describes liquidity-taking + liquidity-providing behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,17 +72,5 @@ impl FillResult {
 impl fmt::Display for OrderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "#{}", self.0)
-    }
-}
-
-impl fmt::Display for Price {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl fmt::Display for Qty {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
     }
 }

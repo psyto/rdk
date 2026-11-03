@@ -30,7 +30,7 @@ use crate::types::{
     PublisherKey,
 };
 use crate::verify::verify_observation;
-use rdk_funding::IndexPrice;
+use rdk_units::IndexPrice;
 use std::collections::BTreeMap;
 
 /// One feed's most-recent observation, retained between blocks until

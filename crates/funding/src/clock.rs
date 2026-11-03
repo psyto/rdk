@@ -96,7 +96,7 @@ impl FundingClock {
 mod tests {
     use super::*;
     use crate::types::{Notional, PositionSize};
-    use rdk_clob::AccountId;
+    use rdk_units::AccountId;
 
     fn pos(account: u64, size: i64) -> Position {
         Position {

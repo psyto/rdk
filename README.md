@@ -1,14 +1,66 @@
-# rdk — build a DeFi L1 on Reth
+# rdk — perp DEX building blocks in Rust
 
-**Complete, tested reference implementations of DeFi L1s on Reth + Malachite** — a perp DEX
-(OpenHL) and a prime broker (Princeps) — plus the shared kit of primitives behind them.
+**Pick the piece you need:** an orderbook, an oracle aggregator, funding, margin and liquidation,
+settlement — each its own small crate with no Reth, no consensus and no I/O, so you can use one
+without the rest. Two complete L1s built from them, a perp DEX (OpenHL) and a prime broker
+(Princeps), show how the pieces fit.
 
-Want to see how a real perpetuals exchange or prime broker works as its *own* Reth-based L1 —
-consensus, EVM precompiles, orderbook, funding, liquidation, settlement, wired end-to-end? This is a
-working, **590-test** reference you can read and run. Built the way Reth ships: reusable `rdk-*`
-crates + node binaries on top.
+## Pick a crate
 
-## The reference implementations
+| I want to… | Crate | Depends on |
+|---|---|---|
+| match orders (price-time priority, limit and market) | `rdk-clob` | `rdk-units` |
+| combine several price feeds into one index, dropping outliers | `rdk-oracle` | `rdk-units`, `k256` |
+| compute funding rates and settle them | `rdk-funding` | `rdk-units` |
+| check margin, liquidate, run an insurance fund and ADL | `rdk-liquidation` | `rdk-units` |
+| settle fills and funding into balances | `rdk-clearing` | `rdk-clob`, `rdk-funding` |
+| pool collateral into shares | `rdk-vault` | — |
+| share account, price and size types between them | `rdk-units` | — |
+
+`rdk-units` holds the newtypes (`AccountId`, `Price`, `Qty`, `Side`, `MarkPrice`, `IndexPrice`,
+`PositionSize`, `Notional`). `rdk-clob` and `rdk-funding` re-export them, so `rdk_clob::AccountId`
+and `rdk_units::AccountId` are the same type.
+
+## Quickstart
+
+Each builds only its own crate and needs no node:
+
+```bash
+git clone https://github.com/psyto/rdk && cd rdk
+cargo run -p rdk-clob --example quickstart         # a maker rests, a taker fills part of it
+cargo run -p rdk-oracle --example quickstart       # three feeds, one 5% off, dropped
+cargo run -p rdk-liquidation --example quickstart  # a long checked as the mark falls
+```
+```
+mark   100000000: margin  1500 bp, Safe
+mark    90000000: margin   555 bp, AtRisk
+mark    86000000: margin   116 bp, Liquidatable
+mark    84000000: margin  -119 bp, Underwater
+```
+
+Use one in your project (not on crates.io yet; Cargo finds the crate inside the repo by name):
+
+```toml
+[dependencies]
+rdk-liquidation = { git = "https://github.com/psyto/rdk" }
+rdk-units       = { git = "https://github.com/psyto/rdk" }
+```
+```rust
+use rdk_liquidation::{margin_health, AccountSnapshot, LiquidationParams};
+use rdk_units::{AccountId, MarkPrice, Notional, PositionSize};
+
+let account = AccountSnapshot {
+    account: AccountId(1),
+    position_size: PositionSize(10),        // long 10
+    avg_entry: MarkPrice(100_000_000),      // at $100 (minor units)
+    collateral: Notional(150_000_000),      // $150
+};
+let health = margin_health(&account, MarkPrice(86_000_000), &LiquidationParams::hyperliquid_default());
+// Liquidatable
+```
+Pin a commit (`rev = "…"`) rather than following `main`.
+
+## How the pieces fit: two reference L1s
 
 - **`openhl/` — a Hyperliquid-shape perp DEX, as its own L1.** Reth (EVM execution) + Malachite (BFT
   consensus) + on-chain CLOB, funding, and liquidation via custom precompiles. A complete, explorable
@@ -19,20 +71,9 @@ crates + node binaries on top.
   (future) options under one shared risk engine. → [`princeps/README.md`](princeps/README.md) ·
   powers Fabrknt's [EVM Prime Broker Sandbox](https://fabrknt.com/reactor/evm-prime-broker)
 
-## The kit behind them — `crates/`
-
-Both apps need the same substrate and the same trading primitives, so the shared layer is factored
-once: `rdk-*` crates any Reth+Malachite L1 can consume.
-
-| crate | what it does |
-|---|---|
-| `clob` | central-limit orderbook matching engine |
-| `funding` | funding-rate computation |
-| `vault` | share-based collateral pooling |
-| `liquidation` | margin math + insurance fund + scanner + ADL |
-| `clearing` | settlement |
-| `oracle` | signed-observation aggregation + circuit breaker |
-| `types` · `codec` | shared data structures + wire codec |
+Both are wired end to end — consensus, EVM precompiles, orderbook, funding, liquidation,
+settlement — and tested (855 tests across the workspace, 2026-11-03). Built the way Reth ships: reusable
+`rdk-*` crates with node binaries on top.
 
 ### Why one repo (not three)
 
@@ -48,7 +89,8 @@ itself ships: one repo, reusable `reth-*` crates, and binaries on top.**
 ```
 rdk/
 ├── crates/                  ← shared DeFi primitives (consumed by openhl + princeps)
-│   ├── types
+│   ├── units                ← shared account / price / size types (every trading crate uses these)
+│   ├── types                ← consensus ↔ execution contract types
 │   ├── codec
 │   ├── clob                 ← central limit orderbook matching engine
 │   ├── funding              ← funding rate computation
@@ -87,7 +129,7 @@ All pins are release-tag SHAs in `Cargo.toml`. Bump in a dedicated PR.
 
 ```bash
 cargo check                       # workspace
-cargo test --workspace            # 590+ tests
+cargo test --workspace            # 855 tests (2026-11-03)
 cargo run --bin openhl -- --help  # OpenHL node
 cargo run --bin princeps -- --help  # Princeps node
 ```

@@ -100,7 +100,7 @@ fn saturate_i128_to_i64(v: i128) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdk_clob::AccountId;
+    use rdk_units::AccountId;
     use proptest::prelude::*;
 
     fn pos(account: u64, size: i64) -> Position {

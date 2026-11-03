@@ -63,7 +63,7 @@ pub(crate) mod test_signing {
     use super::*;
     use crate::types::{FeedId, PriceObservation, Signature};
     use k256::ecdsa::{signature::Signer, SigningKey};
-    use rdk_funding::IndexPrice;
+    use rdk_units::IndexPrice;
 
     /// Build a [`SigningKey`] from a deterministic 32-byte seed. Used
     /// by tests that need a reproducible publisher identity.
@@ -114,7 +114,7 @@ mod tests {
     use super::test_signing::{sign_observation, test_publisher_key, test_signing_key};
     use super::*;
     use crate::types::{FeedId, PriceObservation, Signature};
-    use rdk_funding::IndexPrice;
+    use rdk_units::IndexPrice;
 
     #[test]
     fn round_trip_verifies() {

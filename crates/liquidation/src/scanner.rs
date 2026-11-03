@@ -45,8 +45,8 @@ use crate::insurance::{InsuranceFund, WithdrawOutcome};
 use crate::types::{
     AccountSnapshot, CloseOrderSpec, LiquidationParams, MarginHealth, SolventClose, UnderwaterClose,
 };
-use rdk_clob::AccountId;
-use rdk_funding::MarkPrice;
+use rdk_units::AccountId;
+use rdk_units::MarkPrice;
 
 /// Discriminated outcome for a single liquidated account in a scan.
 ///
@@ -240,7 +240,7 @@ impl LiquidationScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdk_funding::{Notional, PositionSize};
+    use rdk_units::{Notional, PositionSize};
     use proptest::prelude::*;
 
     fn snapshot(account: u64, size: i64, entry: u64, collateral: i64) -> AccountSnapshot {

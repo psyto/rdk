@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/types",
     "crates/codec",
+    "crates/units",
     "crates/clob",
     "crates/oracle",
     "crates/funding",
@@ -36,6 +37,7 @@ authors      = ["psyto <saito.hiroyuki@gmail.com>"]
 # --- rdk shared crates (DeFi L1 primitives) ---
 rdk-types       = { path = "crates/types" }
 rdk-codec       = { path = "crates/codec" }
+rdk-units       = { path = "crates/units" }
 rdk-clob        = { path = "crates/clob" }
 rdk-oracle      = { path = "crates/oracle" }
 rdk-funding     = { path = "crates/funding" }

@@ -13,7 +13,7 @@
 //! stale and zero-price observations at ingestion, then once per block
 //! drops feeds that deviate too far from the median (single-feed
 //! manipulation defense) and computes the median over the survivors.
-//! The result is the trusted [`IndexPrice`](rdk_funding::IndexPrice)
+//! The result is the trusted [`IndexPrice`](rdk_units::IndexPrice)
 //! that `rdk_funding` consumes against the CLOB mark to compute
 //! funding rates, and that `rdk_liquidation` could optionally use
 //! for cross-checking the CLOB's mark in stress scenarios.

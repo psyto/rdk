@@ -8,8 +8,7 @@ repository   = { workspace = true }
 authors      = { workspace = true }
 
 [dependencies]
-rdk-clob    = { workspace = true }
-rdk-funding = { workspace = true }
+rdk-units   = { workspace = true }
 serde          = { workspace = true }
 
 [dev-dependencies]

@@ -13,31 +13,13 @@
 //! integers scaled by [`RATE_SCALE`] (parts-per-billion) for rates and
 //! premiums, and a separate `Notional` type for quote-currency deltas.
 
-use rdk_clob::AccountId;
-use serde::{Deserialize, Serialize};
+pub use rdk_units::{AccountId, IndexPrice, MarkPrice, Notional, PositionSize};
 
 /// Scale factor for [`FundingRate`] and [`Premium`]. A raw value of
 /// `RATE_SCALE` represents `1.0` (i.e., 100%). With `1e9` we get 9 decimal
 /// digits of precision — more than enough for funding rates that typically
 /// sit in the ±0.01% to ±0.05% per interval band.
 pub const RATE_SCALE: i64 = 1_000_000_000;
-
-/// Mark price in minor units. Same scale convention as `clob::Price`, but a
-/// distinct type so callers can't accidentally feed an orderbook price into
-/// the funding math where an index/oracle price is expected.
-///
-/// `MarkPrice` is a single u64 not a signed-fixed-point, because prices are
-/// always positive (zero or negative price would be a system invariant
-/// violation handled upstream, not here).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct MarkPrice(pub u64);
-
-// IndexPrice derive lives below; both gain serde in Stage 16d for
-// cached-oracle-price persistence.
-
-/// Index price (off-chain oracle reference). Same scale as `MarkPrice`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct IndexPrice(pub u64);
 
 /// Premium = `(mark - index) / index`, scaled by [`RATE_SCALE`].
 ///
@@ -50,18 +32,6 @@ pub struct Premium(pub i64);
 /// longs pay shorts. A rate of `RATE_SCALE / 100` = 1% per interval.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FundingRate(pub i64);
-
-/// Signed position size in base units. Positive = long, negative = short,
-/// zero = flat. Accounts with zero size aren't included in settlement
-/// snapshots — see [`Position`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct PositionSize(pub i64);
-
-/// Signed quote-currency delta. Positive = account receives, negative =
-/// account pays. Funding settlement produces one [`Notional`] per non-flat
-/// position per tick.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Notional(pub i64);
 
 /// A single account's net position on the market. The funding state machine
 /// treats positions as a per-tick *snapshot* — it never owns or mutates

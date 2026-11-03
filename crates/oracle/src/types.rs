@@ -17,7 +17,7 @@
 //! result is what `rdk_funding::compute_premium` consumes against the
 //! CLOB-derived mark price to compute the per-interval funding rate.
 
-use rdk_funding::IndexPrice;
+use rdk_units::IndexPrice;
 use serde::{Deserialize, Serialize};
 
 /// Bps scale factor. 1 bp = 0.01%; `DEVIATION_SCALE` = 10⁴ means

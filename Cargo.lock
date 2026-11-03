@@ -7775,7 +7775,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "proptest",
- "serde",
+ "rdk-units",
 ]
 
 [[package]]
@@ -7787,8 +7787,7 @@ name = "rdk-funding"
 version = "0.1.0"
 dependencies = [
  "proptest",
- "rdk-clob",
- "serde",
+ "rdk-units",
 ]
 
 [[package]]
@@ -7796,8 +7795,7 @@ name = "rdk-liquidation"
 version = "0.1.0"
 dependencies = [
  "proptest",
- "rdk-clob",
- "rdk-funding",
+ "rdk-units",
  "serde",
 ]
 
@@ -7807,12 +7805,19 @@ version = "0.1.0"
 dependencies = [
  "k256",
  "proptest",
- "rdk-funding",
+ "rdk-units",
  "serde",
 ]
 
 [[package]]
 name = "rdk-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "rdk-units"
 version = "0.1.0"
 dependencies = [
  "serde",

@@ -18,8 +18,8 @@ use crate::types::{
     AccountSnapshot, CloseOrderSpec, LiquidationParams, MarginHealth, MarginRatio, SolventClose,
     UnderwaterClose, MARGIN_SCALE,
 };
-use rdk_clob::{Qty, Side};
-use rdk_funding::MarkPrice;
+use rdk_units::{Qty, Side};
+use rdk_units::MarkPrice;
 
 /// Notional exposure of the account = `|position_size| × mark`, in quote
 /// units. Returns `0` for a flat position (no exposure regardless of mark).
@@ -256,8 +256,8 @@ pub fn underwater_close_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdk_clob::AccountId;
-    use rdk_funding::{Notional, PositionSize};
+    use rdk_units::AccountId;
+    use rdk_units::{Notional, PositionSize};
     use proptest::prelude::*;
 
     fn snapshot(size: i64, entry: u64, collateral: i64) -> AccountSnapshot {
