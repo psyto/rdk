@@ -7,16 +7,17 @@ without the rest. Two complete L1s built from them, a perp DEX (OpenHL) and a pr
 
 ## Pick a crate
 
-| I want to… | Crate | Depends on |
+| I want to… | Crate | Other rdk crates it pulls in |
 |---|---|---|
 | match orders (price-time priority, limit and market) | `rdk-clob` | `rdk-units` |
-| combine several price feeds into one index, dropping outliers | `rdk-oracle` | `rdk-units`, `k256` |
+| combine several price feeds into one index, dropping outliers | `rdk-oracle` | `rdk-units` |
 | compute funding rates and settle them | `rdk-funding` | `rdk-units` |
 | check margin, liquidate, run an insurance fund and ADL | `rdk-liquidation` | `rdk-units` |
 | settle fills and funding into balances | `rdk-clearing` | `rdk-clob`, `rdk-funding` |
 | pool collateral into shares | `rdk-vault` | — |
 | share account, price and size types between them | `rdk-units` | — |
 
+Outside rdk the crates use `serde`, and `rdk-oracle` also `k256` for signed observations.
 `rdk-units` holds the newtypes (`AccountId`, `Price`, `Qty`, `Side`, `MarkPrice`, `IndexPrice`,
 `PositionSize`, `Notional`). `rdk-clob` and `rdk-funding` re-export them, so `rdk_clob::AccountId`
 and `rdk_units::AccountId` are the same type.
@@ -27,9 +28,9 @@ Each builds only its own crate and needs no node:
 
 ```bash
 git clone https://github.com/psyto/rdk && cd rdk
-cargo run -p rdk-clob --example quickstart         # a maker rests, a taker fills part of it
-cargo run -p rdk-oracle --example quickstart       # three feeds, one 5% off, dropped
-cargo run -p rdk-liquidation --example quickstart  # a long checked as the mark falls
+cargo run -p rdk-clob --example clob_quickstart         # a maker rests, a taker fills part of it
+cargo run -p rdk-oracle --example oracle_quickstart       # three feeds, one 5% off, dropped
+cargo run -p rdk-liquidation --example liquidation_quickstart  # a long checked as the mark falls
 ```
 ```
 mark   100000000: margin  1500 bp, Safe

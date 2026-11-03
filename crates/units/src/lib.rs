@@ -56,12 +56,14 @@ pub struct MarkPrice(pub u64);
 pub struct IndexPrice(pub u64);
 
 /// Signed position size in base units. Positive = long, negative = short,
-/// zero = flat.
+/// zero = flat. Accounts with zero size aren't included in funding
+/// settlement snapshots (see `rdk_funding::Position`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PositionSize(pub i64);
 
 /// Signed quote-currency delta. Positive = account receives, negative =
-/// account pays.
+/// account pays. Funding settlement produces one `Notional` per non-flat
+/// position per tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Notional(pub i64);
 

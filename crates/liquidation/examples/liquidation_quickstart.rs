@@ -1,4 +1,4 @@
-//! `cargo run -p rdk-liquidation --example quickstart`
+//! `cargo run -p rdk-liquidation --example liquidation_quickstart`
 //!
 //! A 10-unit long opened at $100 with $15 of collateral per unit (15% margin),
 //! checked as the mark falls.

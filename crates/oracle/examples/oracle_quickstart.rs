@@ -1,4 +1,4 @@
-//! `cargo run -p rdk-oracle --example quickstart`
+//! `cargo run -p rdk-oracle --example oracle_quickstart`
 //!
 //! Three feeds report an index price; one is 5% off. The median, then the
 //! deviation filter, then the median again drop it.

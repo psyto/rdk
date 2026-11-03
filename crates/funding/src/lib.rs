@@ -26,6 +26,7 @@ pub mod types;
 pub use clock::{FundingClock, FundingTick};
 pub use compute::{apply_funding, compute_premium, compute_rate};
 pub use types::{
+    AccountId,
     FundingParams, FundingRate, IndexPrice, MarkPrice, Notional, Position, PositionSize,
     Premium, Settlement, RATE_SCALE,
 };

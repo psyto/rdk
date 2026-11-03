@@ -1,4 +1,4 @@
-//! `cargo run -p rdk-clob --example quickstart`
+//! `cargo run -p rdk-clob --example clob_quickstart`
 //!
 //! A maker rests an ask, a taker buys part of it at market.
 
