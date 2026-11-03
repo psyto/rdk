@@ -124,7 +124,7 @@ cargo run --bin princeps -- lending-demo
 
 - [`fabrknt/website/CONCEPT.md`](../../fabrknt/website/CONCEPT.md) — the Fabrknt brand and 2x2 sandbox structure.
 - [`fabrknt/website/SANDBOX-PATTERN.md`](../../fabrknt/website/SANDBOX-PATTERN.md) — cross-engine spec for the five sandbox elements.
-- [`../README.md`](../README.md) — the parent `rdk` monorepo and the shared `rdk-*` crates Princeps consumes.
+- [`../README.md`](../README.md) — the parent `rdk` monorepo and the shared `rdk-*` crates Princeps consumes; each is usable on its own (start from its "Pick a crate" table).
 - [`../openhl/README.md`](../openhl/README.md) — sibling engine, EVM Perp Sandbox.
 - [`docs/architecture.md`](docs/architecture.md) — subsystem detail, lending flow, portfolio cross-margin.
 - [`docs/adr/`](docs/adr/) — load-bearing architectural decisions (consensus choice, sequencer posture, oracle quorum, bad-debt policy, …).

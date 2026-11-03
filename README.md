@@ -131,6 +131,7 @@ All pins are release-tag SHAs in `Cargo.toml`. Bump in a dedicated PR.
 ```bash
 cargo check                       # workspace
 cargo test --workspace            # 855 tests (2026-11-03)
+cargo test -p rdk-units -p rdk-clob -p rdk-funding -p rdk-oracle -p rdk-liquidation -p rdk-clearing -p rdk-vault  # shared crates only, no Reth build
 cargo run --bin openhl -- --help  # OpenHL node
 cargo run --bin princeps -- --help  # Princeps node
 ```

@@ -145,7 +145,7 @@ cargo run --bin openhl -- --help
 
 - [`fabrknt/website/CONCEPT.md`](../../fabrknt/website/CONCEPT.md) — the Fabrknt brand and 2x2 sandbox structure.
 - [`fabrknt/website/SANDBOX-PATTERN.md`](../../fabrknt/website/SANDBOX-PATTERN.md) — cross-engine spec for the five sandbox elements.
-- [`../README.md`](../README.md) — the parent `rdk` monorepo and the shared crates `openhl` consumes.
+- [`../README.md`](../README.md) — the parent `rdk` monorepo and the shared crates `openhl` consumes; each is usable on its own (start from its "Pick a crate" table).
 - [`docs/architecture.md`](docs/architecture.md) — subsystem detail, CL/EL contract, determinism rules.
 - [`docs/testing.md`](docs/testing.md) — test layout and ignored-diagnostic runbook.
 

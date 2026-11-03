@@ -1,5 +1,7 @@
 # Migration: psyto/openhl + psyto/princeps → psyto/rdk
 
+> Since 2026-11-03 there is a ninth shared crate, `rdk-units`, holding the account, price and size types the others share (README, "Pick a crate"). This document records the June migration as it was.
+
 Date: 2026-06-03. Both source repos were `/Users/hiroyusai/src/openhl` and `/Users/hiroyusai/src/princeps`. Both had ~identical scaffolding (Reth+Malachite+CLOB+funding+vault+liquidation+clearing+oracle) after Princeps was bootstrapped from OpenHL via rsync on 2026-05-31. Princeps added `lending`, `portfolio`, `liquidator-bot`, `lending-rpc-server` and accumulated divergence in `evm` (+936 LOC for prime-broker precompiles), `consensus`, and `node`.
 
 ## Boundary chosen

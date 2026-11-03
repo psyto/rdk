@@ -7,7 +7,7 @@ Princeps is a single Rust binary composed of two cleanly-separated halves:
 - **Consensus layer (CL)** — Malachite BFT, wired through `crates/consensus`. Owns leader election, voting, view changes, finality.
 - **Execution layer (EL)** — Reth as a library, wired through `crates/evm`. Owns state, EVM execution, payload building, mempool.
 
-Plus four pure state-machine subsystems that the EL composes:
+Plus four pure state-machine subsystems that the EL composes. They are the shared `rdk-*` crates in the parent repo's `crates/` (each usable on its own; see [`../../README.md`](../../README.md)), and share account, price and size types through `crates/units` (`rdk-units`):
 
 - **CLOB** (`crates/clob`) — orderbook matching engine. Pure, deterministic, replayable.
 - **Settlement** (`crates/funding`, `crates/oracle`, `crates/liquidation`) — funding rates, mark prices, liquidations. `funding` (Stage 8b), `liquidation` (10a margin math → 10b insurance fund → 10c multi-account scanner → 10d ADL), and `oracle` (11 aggregation → 11b signed observations) are all complete; each runs deterministically per block via the integration coordinator (Stages 14a–15e).
