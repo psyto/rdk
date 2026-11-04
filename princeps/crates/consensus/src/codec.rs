@@ -312,6 +312,8 @@ impl Codec<StreamMessage<PrincepsProposalPart>> for PrincepsCodec {
 
 /// Mirror of [`Validity`] — the upstream enum only derives borsh, not serde,
 /// so we round-trip it through this serde-friendly twin.
+/// Upstream: https://github.com/circlefin/malachite/issues/1615 — drop this
+/// twin once `Validity` derives serde there.
 #[derive(Serialize, Deserialize)]
 enum RawValidity {
     Valid,
