@@ -67,8 +67,8 @@ Projects of ours that depend on rdk through the pinned tag, the way an outside p
   attack, a stablecoin depeg and a treasury shock with `rdk-oracle`, `rdk-clob`, `rdk-funding`,
   `rdk-liquidation` and `rdk-vault`. Moved from a local `path` dependency to `tag = "v0.1.0"` on
   2026-11-04 (dropping `rdk-types` and `rdk-clearing`, which it declared but never imported); its
-  three scenarios emit the same events as with the rdk commit it used before (3fa40d2). The public
-  Failsafe page currently points its simulator at `localhost:7777`, so it is run locally.
+  three scenarios emit the same events as with the rdk commit it used before (3fa40d2). It is run
+  locally: the public Failsafe page has no server behind it and plays a scripted demo instead.
 
 Three older prototypes and copies still use local `path` dependencies and are not counted.
 
