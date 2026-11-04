@@ -43,8 +43,8 @@ Use one in your project (not on crates.io yet; Cargo finds the crate inside the 
 
 ```toml
 [dependencies]
-rdk-liquidation = { git = "https://github.com/psyto/rdk" }
-rdk-units       = { git = "https://github.com/psyto/rdk" }
+rdk-liquidation = { git = "https://github.com/psyto/rdk", tag = "v0.1.0" }
+rdk-units       = { git = "https://github.com/psyto/rdk", tag = "v0.1.0" }
 ```
 ```rust
 use rdk_liquidation::{margin_health, AccountSnapshot, LiquidationParams};
@@ -59,7 +59,23 @@ let account = AccountSnapshot {
 let health = margin_health(&account, MarkPrice(86_000_000), &LiquidationParams::hyperliquid_default());
 // Liquidatable
 ```
-Pin a commit (`rev = "…"`) rather than following `main`.
+Pin a tag (or a `rev`) rather than following `main`; Cargo.lock then records the commit.
+
+## Used in
+Projects of ours that depend on rdk through the pinned tag, the way an outside project would:
+- Fabrknt's Failsafe scenario server (`fabrknt/website`, `sim/`, private): replays an oracle
+  attack, a stablecoin depeg and a treasury shock with `rdk-oracle`, `rdk-clob`, `rdk-funding`,
+  `rdk-liquidation` and `rdk-vault`. Moved from a local `path` dependency to `tag = "v0.1.0"` on
+  2026-11-04 (dropping `rdk-types` and `rdk-clearing`, which it declared but never imported); its
+  three scenarios emit the same events as with the rdk commit it used before (3fa40d2). The public
+  Failsafe page currently points its simulator at `localhost:7777`, so it is run locally.
+
+Three older prototypes and copies still use local `path` dependencies and are not counted.
+
+## Versions
+Tagged `vX.Y.Z`, all crates together. Not on crates.io yet.
+- `v0.1.0` (15b6f35, 2026-11-04): the first tag. The per-crate layout above, with `rdk-units` for the
+  shared types; 855 workspace tests pass.
 
 ## How the pieces fit: two reference L1s
 
