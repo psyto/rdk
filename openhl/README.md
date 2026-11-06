@@ -29,6 +29,12 @@ If you want the value first and the build second, [**`docs/sample-output.md`**](
 
 If you fit any of those, the [EVM Perp Sandbox landing page](https://fabrknt.com/reactor/evm-perp) is the product-facing companion to this repo.
 
+To build it yourself, step by step, the Build OpenHL courses on [Fabrknt Dojo](https://fabrknt.com/dojo#perp)
+(English and Japanese) walk this code in order: [Perp DEX Primer](https://fabrknt.com/dojo/courses/perp-primer-en) →
+[Devnet](https://fabrknt.com/dojo/courses/reth-openhl-consensus-en) → [CLOB](https://fabrknt.com/dojo/courses/building-openhl-clob-en) →
+[Precompiles](https://fabrknt.com/dojo/courses/building-openhl-precompiles-en) → [Funding](https://fabrknt.com/dojo/courses/building-openhl-funding-en) →
+[Liquidation](https://fabrknt.com/dojo/courses/building-openhl-liquidation-en) → [ADL](https://fabrknt.com/dojo/courses/building-openhl-adl-en).
+
 ## What `openhl` is NOT
 
 - Not a production exchange. Not deployed. No fee capture, no governance, no token.
