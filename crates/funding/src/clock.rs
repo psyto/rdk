@@ -199,11 +199,11 @@ mod tests {
         let mut clock = FundingClock::new(params, 1_000_000);
 
         // mark 200, index 100 → premium = 1.0 = 1e9 ppb
-        // raw rate = 1e9 / 8 = 1.25e8; cap = 4e7 → clamps to 4e7.
+        // raw rate = 1e9 / 8 = 1.25e8; cap = 5e6 → clamps to 5e6.
         let out = clock
             .tick(1_003_600, MarkPrice(200), IndexPrice(100), &balanced_book())
             .unwrap();
-        assert_eq!(out.rate, FundingRate(40_000_000));
+        assert_eq!(out.rate, FundingRate(5_000_000));
     }
 
     #[test]

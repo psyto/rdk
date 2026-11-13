@@ -147,16 +147,16 @@ mod tests {
     fn rate_clamps_at_positive_cap() {
         let params = FundingParams::hyperliquid_default();
         // premium = 1.0 (RATE_SCALE), divisor = 8 → raw = 125_000_000
-        // cap is 40_000_000 → clamps to 40_000_000.
+        // cap is 5_000_000 → clamps to 5_000_000.
         let r = compute_rate(Premium(RATE_SCALE), params);
-        assert_eq!(r, FundingRate(40_000_000));
+        assert_eq!(r, FundingRate(5_000_000));
     }
 
     #[test]
     fn rate_clamps_at_negative_cap() {
         let params = FundingParams::hyperliquid_default();
         let r = compute_rate(Premium(-RATE_SCALE), params);
-        assert_eq!(r, FundingRate(-40_000_000));
+        assert_eq!(r, FundingRate(-5_000_000));
     }
 
     #[test]

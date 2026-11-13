@@ -17,6 +17,8 @@ without the rest. Two complete L1s built from them, a perp DEX (OpenHL) and a pr
 | pool collateral into shares | `rdk-vault` | — |
 | share account, price and size types between them | `rdk-units` | — |
 
+New to the mechanics? [Funding Rates Explained](https://fabrknt.com/hip3/learn/how-perpetual-dexs-work/02-funding-rates-explained.html?utm_source=rdk) and [Hyperliquid Margin and Liquidations](https://fabrknt.com/hip3/learn/hyperliquid-architecture/06-margin-liquidations.html?utm_source=rdk) explain what `rdk-funding` and `rdk-liquidation` compute, and where these crates are simpler than Hyperliquid.
+
 Outside rdk the crates use `serde`, and `rdk-oracle` also `k256` for signed observations.
 `rdk-units` holds the newtypes (`AccountId`, `Price`, `Qty`, `Side`, `MarkPrice`, `IndexPrice`,
 `PositionSize`, `Notional`). `rdk-clob` and `rdk-funding` re-export them, so `rdk_clob::AccountId`

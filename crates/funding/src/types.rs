@@ -54,10 +54,10 @@ pub struct Settlement {
 
 /// Network parameters that govern funding cadence and magnitude.
 ///
-/// `divisor` represents "settlements per day": HL settles 8 times per day,
-/// so `premium / 8` is the per-interval rate. Higher divisor → smaller rate
-/// per tick (and inverse: lower divisor concentrates the same daily target
-/// rate into fewer payments).
+/// `divisor` turns the premium into a per-interval rate: HL quotes funding as
+/// an 8-hour rate and pays one-eighth of it every hour, so with a 1-hour
+/// interval `premium / 8` is the hourly rate. A higher divisor gives a smaller
+/// rate per tick.
 ///
 /// `rate_cap` is the absolute maximum |rate| per interval. Production
 /// networks set this to bound the worst-case payment an extreme oracle
@@ -70,17 +70,17 @@ pub struct FundingParams {
 }
 
 impl FundingParams {
-    /// Hyperliquid-style defaults: 1-hour interval, ±4%/hour cap, 8× divisor.
-    /// 8× divisor with a 1-hour interval means the *target* daily premium
-    /// would be applied across 24 hours' worth of ticks at 1/8 of the premium
-    /// each — i.e., 24/8 = 3× the premium per day. That asymmetry is
-    /// intentional: HL caps more aggressively than the divisor alone implies.
+    /// Hyperliquid-style defaults: 1-hour interval, 8× divisor (the 8-hour
+    /// rate paid hourly), ±0.5%/hour cap, as HL's funding docs state
+    /// (<https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding>,
+    /// checked 2026-11-13). HL's interest term is not modelled (see the crate
+    /// docs).
     #[must_use]
     pub const fn hyperliquid_default() -> Self {
         Self {
             interval_secs: 3600,
-            // 4% per interval = 40_000_000 ppb (since 0.04 × 1e9 = 4e7).
-            rate_cap: FundingRate(40_000_000),
+            // 0.5% per interval = 5_000_000 ppb (since 0.005 × 1e9 = 5e6).
+            rate_cap: FundingRate(5_000_000),
             divisor: 8,
         }
     }

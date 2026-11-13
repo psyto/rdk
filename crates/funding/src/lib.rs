@@ -9,9 +9,11 @@
 //! Perpetual contracts don't expire, so the mark price can drift arbitrarily
 //! from the spot ("index") price. Funding payments push it back: when mark >
 //! index (longs are overpaying), longs pay shorts; when mark < index, shorts
-//! pay longs. The premium `(mark - index) / index` is divided by a
-//! per-day-interval count (HL: 8 — one settlement every 3 hours) to derive a
-//! per-interval rate, capped at a network-set absolute max. At each tick
+//! pay longs. The premium `(mark - index) / index` is divided by a divisor
+//! (HL: 8, because HL quotes an 8-hour rate and pays one-eighth of it every
+//! hour) to derive a per-interval rate, capped at a network-set absolute max.
+//! HL also adds a fixed interest term (0.01% per 8 hours) through a clamp;
+//! this crate leaves that term out and uses the premium alone. At each tick
 //! every account with an open position settles `position_size * mark * rate`
 //! in quote currency.
 //!
