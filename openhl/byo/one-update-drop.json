@@ -1,0 +1,63 @@
+{
+  "name": "one-update-drop",
+  "category": "your-market",
+  "description": "A template for testing your own market. The oracle starts at 1130 and three longs of different leverage buy from one maker there. At block 3 the oracle falls 15.6% in a single update, to 954, the size of the xyz:SKHX drop on Hyperliquid on 2026-07-27. Change the params to your market's margins and fee, change the accounts and the drop to the stress you worry about, and write in expected_outcomes what your design must guarantee.",
+  "headline": "One oracle update cuts the price 15.6% (1130 -> 954): which of three longs survive at a 3% maintenance margin?",
+  "params": {
+    "rounds": 5,
+    "initial_margin_bps": 1000,
+    "maintenance_margin_bps": 300,
+    "liquidation_fee_bps": 150
+  },
+  "history": {
+    "blocks": [
+      {
+        "height": 1,
+        "deposits": [
+          {"account": 10, "amount": 3000},
+          {"account": 20, "amount": 1300},
+          {"account": 30, "amount": 600},
+          {"account": 100, "amount": 50000}
+        ],
+        "trades": [
+          {"id": 9001, "account": 100, "side": "Sell", "qty": 20, "kind": "Limit", "price": 1130}
+        ],
+        "oracle": {"set_price": 1130}
+      },
+      {
+        "height": 2,
+        "trades": [
+          {"id": 9002, "account": 10, "side": "Buy", "qty": 5, "kind": "Market"},
+          {"id": 9003, "account": 20, "side": "Buy", "qty": 5, "kind": "Market"},
+          {"id": 9004, "account": 30, "side": "Buy", "qty": 5, "kind": "Market"}
+        ]
+      },
+      {
+        "height": 3,
+        "oracle": {"set_price": 954}
+      }
+    ]
+  },
+  "expected_outcomes": [
+    {
+      "name": "three-fills",
+      "description": "The three market buys each fill against the maker.",
+      "check": {"fills_min": 3}
+    },
+    {
+      "name": "mark-follows-the-drop",
+      "description": "The mark ends at or below the dropped oracle price.",
+      "check": {"final_mark_max": 954}
+    },
+    {
+      "name": "the-thinly-margined-long-is-closed",
+      "description": "At least one long is liquidated by the drop.",
+      "check": {"liquidations_min": 1}
+    },
+    {
+      "name": "the-well-margined-long-survives",
+      "description": "Not every long is liquidated: the 3,000-deposit account keeps its position.",
+      "check": {"liquidations_max": 2}
+    }
+  ]
+}

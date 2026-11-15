@@ -72,6 +72,10 @@ openhl scenario run cascade
 openhl scenario run cascade --dry-run
 ```
 
+**Run your own market's design.** Write your margins, fee, the stress you worry about and what must
+hold as one scenario file, and run it the same way: [docs/bring-your-own-scenario.md](docs/bring-your-own-scenario.md)
+(template: [`byo/one-update-drop.json`](byo/one-update-drop.json), a one-update 15.6% oracle drop).
+
 Five scenarios ship today:
 - **`cascade`** (stress) — 5-trader multi-block liquidation cascade; 7 outcomes ✓.
 - **`single-block-cascade`** (stress) — same cascade compressed into one block; 3 outcomes ✓.
