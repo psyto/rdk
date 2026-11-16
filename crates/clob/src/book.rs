@@ -10,7 +10,7 @@ use core::cmp::Reverse;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::types::{
-    AccountId, Fill, FillResult, Order, OrderId, OrderType, Price, Qty, Side,
+    AccountId, Fill, FillResult, MarketQuote, Order, OrderId, OrderType, Price, Qty, Side,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -237,6 +237,43 @@ impl Book {
     pub fn depth_ask(&self) -> usize {
         self.asks.values().map(VecDeque::len).sum()
     }
+
+    /// What a market order of `qty` would fill right now, without changing
+    /// the book. Same walk as `submit` with `OrderType::Market`: best price
+    /// first, stopping when `qty` is filled or that side runs out. Use it to
+    /// price an order (or a size) against a book you loaded from another
+    /// venue's snapshot.
+    #[must_use]
+    pub fn quote_market(&self, side: Side, qty: Qty) -> MarketQuote {
+        let mut remaining = qty.0;
+        let mut quote = MarketQuote::default();
+        let mut take = |price: Price, queue: &VecDeque<RestingOrder>| {
+            let level: u64 = queue.iter().map(|o| o.qty.0).sum();
+            let q = level.min(remaining);
+            remaining -= q;
+            quote.filled.0 += q;
+            quote.notional += u128::from(q) * u128::from(price.0);
+            quote.worst_price = Some(price);
+            remaining == 0
+        };
+        match side {
+            Side::Buy => {
+                for (price, queue) in &self.asks {
+                    if take(*price, queue) {
+                        break;
+                    }
+                }
+            }
+            Side::Sell => {
+                for (rev, queue) in &self.bids {
+                    if take(rev.0, queue) {
+                        break;
+                    }
+                }
+            }
+        }
+        quote
+    }
 }
 
 /// Match a taker against the front of a single price level.
@@ -395,6 +432,25 @@ mod tests {
     fn cancel_unknown_returns_false() {
         let mut book = Book::new();
         assert!(!book.cancel(OrderId(999)));
+    }
+
+    #[test]
+    fn quote_market_prices_without_changing_the_book() {
+        let mut book = Book::new();
+        book.submit(limit(1, 100, Side::Sell, 101, 5));
+        book.submit(limit(2, 101, Side::Sell, 101, 5));
+        book.submit(limit(3, 102, Side::Sell, 103, 10));
+        let q = book.quote_market(Side::Buy, Qty(15));
+        assert_eq!(q.filled, Qty(15));
+        assert_eq!(q.notional, 10 * 101 + 5 * 103);
+        assert_eq!(q.worst_price, Some(Price(103)));
+        assert_eq!(book.depth_ask(), 3, "quote must not touch the book");
+        let short = book.quote_market(Side::Buy, Qty(50));
+        assert_eq!(short.filled, Qty(20));
+        assert_eq!(
+            book.quote_market(Side::Sell, Qty(1)),
+            MarketQuote::default()
+        );
     }
 
     #[test]
@@ -557,6 +613,36 @@ mod prop_tests {
                     prop_assert!(b < a, "book crossed: bid={} ask={}", b.0, a.0);
                 }
             }
+        }
+
+        /// quote_market agrees with a market order submitted on a copy of the book.
+        #[test]
+        fn quote_matches_market_fill(actions in arb_actions(), buy in any::<bool>(), qty in 1u64..=200) {
+            let mut book = Book::new();
+            for action in actions {
+                if let Action::SubmitLimit { id, account, side, price, qty } = action {
+                    book.submit(Order {
+                        id: OrderId(id),
+                        account: AccountId(account),
+                        side,
+                        qty: Qty(qty),
+                        order_type: OrderType::Limit { price: Price(price) },
+                    });
+                }
+            }
+            let side = if buy { Side::Buy } else { Side::Sell };
+            let quote = book.quote_market(side, Qty(qty));
+            let r = book.clone().submit(Order {
+                id: OrderId(u64::MAX),
+                account: AccountId(0),
+                side,
+                qty: Qty(qty),
+                order_type: OrderType::Market,
+            });
+            let notional: u128 = r.fills.iter().map(|f| u128::from(f.qty.0) * u128::from(f.price.0)).sum();
+            prop_assert_eq!(quote.filled, r.total_filled());
+            prop_assert_eq!(quote.notional, notional);
+            prop_assert_eq!(quote.worst_price, r.fills.last().map(|f| f.price));
         }
 
         /// Determinism: applying the same action sequence produces the same

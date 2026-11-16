@@ -69,6 +69,17 @@ impl FillResult {
     }
 }
 
+/// The fill a market order would get, from [`crate::Book::quote_market`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarketQuote {
+    /// Quantity the book can fill (less than asked when that side runs out).
+    pub filled: Qty,
+    /// Sum of `price * qty` over the fills, in price-minor × qty-minor units.
+    pub notional: u128,
+    /// Price of the last level touched; `None` when nothing fills.
+    pub worst_price: Option<Price>,
+}
+
 impl fmt::Display for OrderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "#{}", self.0)

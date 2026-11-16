@@ -12,4 +12,6 @@ pub mod book;
 pub mod types;
 
 pub use book::Book;
-pub use types::{AccountId, Fill, FillResult, Order, OrderId, OrderType, Price, Qty, Side};
+pub use types::{
+    AccountId, Fill, FillResult, MarketQuote, Order, OrderId, OrderType, Price, Qty, Side,
+};
