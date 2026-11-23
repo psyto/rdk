@@ -9,7 +9,7 @@ without the rest. Two complete L1s built from them, a perp DEX (OpenHL) and a pr
 
 | I want to… | Crate | Other rdk crates it pulls in |
 |---|---|---|
-| match orders (price-time priority, limit and market), or price a market order against a book without changing it (`Book::quote_market`) | `rdk-clob` | `rdk-units` |
+| match orders (price-time priority, limit, immediate-or-cancel and market), or price a market order against a book without changing it (`Book::quote_market`) | `rdk-clob` | `rdk-units` |
 | combine several price feeds into one index, dropping outliers | `rdk-oracle` | `rdk-units` |
 | compute funding rates and settle them | `rdk-funding` | `rdk-units` |
 | check margin, liquidate, run an insurance fund and ADL | `rdk-liquidation` | `rdk-units` |
@@ -78,6 +78,12 @@ Projects of ours that depend on rdk through the pinned tag, the way an outside p
   quote. Pinned to `rev = "f263f08…"` (after `v0.1.0`). `quote_market` was added for it: before, the
   only way to price an order was to clone the book and submit one.
 
+- [fabrknt/research, naive market maker](https://github.com/fabrknt/research/tree/main/2026-11-23-naive-mm)
+  (public): rests a market maker's quotes in `rdk-clob` and replays 57,393 recorded Elysium swaps
+  against them as `OrderType::ImmediateOrCancel` takers. Pinned to `rev = "653b8d4…"`. IOC was added
+  for it: before, a replayed taker had to be a `Limit` cancelled by id afterwards, and a `Limit` that
+  rests reports zero remaining, so the caller could not tell what was left.
+
 Three older prototypes and copies still use local `path` dependencies and are not counted.
 
 ## Versions
@@ -85,7 +91,7 @@ Tagged `vX.Y.Z`, all crates together. Not on crates.io yet.
 - `v0.1.0` (15b6f35, 2026-11-04): the first tag. The per-crate layout above, with `rdk-units` for the
   shared types; 855 workspace tests pass.
 - Untagged on `main` since `v0.1.0`: `rdk-clob` `Book::quote_market` and `MarketQuote` (f263f08,
-  2026-11-16). Pin that `rev` to use it.
+  2026-11-16), `OrderType::ImmediateOrCancel` (653b8d4, 2026-11-23). Pin that `rev` to use them.
 
 ## How the pieces fit: two reference L1s
 
