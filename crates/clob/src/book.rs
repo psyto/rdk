@@ -41,12 +41,13 @@ impl Book {
     /// book; Market orders discard it (returned via `remaining_qty`).
     pub fn submit(&mut self, order: Order) -> FillResult {
         match order.order_type {
-            OrderType::Limit { price } => self.submit_limit(order, price),
+            OrderType::Limit { price } => self.submit_limit(order, price, true),
+            OrderType::ImmediateOrCancel { price } => self.submit_limit(order, price, false),
             OrderType::Market => self.submit_market(order),
         }
     }
 
-    fn submit_limit(&mut self, order: Order, limit_price: Price) -> FillResult {
+    fn submit_limit(&mut self, order: Order, limit_price: Price, rest: bool) -> FillResult {
         let mut remaining = order.qty;
         let mut fills = Vec::new();
 
@@ -96,6 +97,13 @@ impl Book {
                     }
                 }
             }
+        }
+
+        if !rest {
+            return FillResult {
+                fills,
+                remaining_qty: remaining,
+            };
         }
 
         // Any unfilled limit qty rests on the book.
@@ -432,6 +440,34 @@ mod tests {
     fn cancel_unknown_returns_false() {
         let mut book = Book::new();
         assert!(!book.cancel(OrderId(999)));
+    }
+
+    #[test]
+    fn immediate_or_cancel_fills_to_its_price_and_never_rests() {
+        let mut book = Book::new();
+        book.submit(limit(1, 100, Side::Sell, 101, 5));
+        book.submit(limit(2, 101, Side::Sell, 103, 5));
+        let r = book.submit(Order {
+            id: OrderId(3),
+            account: AccountId(200),
+            side: Side::Buy,
+            qty: Qty(8),
+            order_type: OrderType::ImmediateOrCancel { price: Price(102) },
+        });
+        assert_eq!(r.total_filled(), Qty(5));
+        assert_eq!(r.remaining_qty, Qty(3), "the unfilled part comes back");
+        assert_eq!(book.best_bid(), None, "nothing rests");
+        assert_eq!(book.best_ask(), Some(Price(103)));
+        let none = book.submit(Order {
+            id: OrderId(4),
+            account: AccountId(200),
+            side: Side::Sell,
+            qty: Qty(2),
+            order_type: OrderType::ImmediateOrCancel { price: Price(90) },
+        });
+        assert!(none.fills.is_empty());
+        assert_eq!(none.remaining_qty, Qty(2));
+        assert_eq!(book.depth_ask(), 1);
     }
 
     #[test]

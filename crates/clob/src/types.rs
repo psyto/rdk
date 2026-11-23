@@ -19,6 +19,9 @@ pub enum OrderType {
     Limit { price: Price },
     /// Take whatever liquidity is available at any price; never rests.
     Market,
+    /// Take liquidity at or better than `price`; never rests. The unfilled
+    /// part comes back in [`FillResult::remaining_qty`].
+    ImmediateOrCancel { price: Price },
 }
 
 /// A new order entering the book or arriving as a taker.
@@ -52,7 +55,8 @@ pub struct Fill {
 ///
 /// `fills` is the list of matched fills, in order of execution. `remaining_qty`
 /// is the leftover taker quantity that was *not* rested on the book (Market
-/// orders discard their remainder; fully-filled Limit orders return zero).
+/// and `ImmediateOrCancel` orders discard their remainder; fully-filled Limit
+/// orders return zero).
 /// A partially-filled Limit order that rested on the book also returns zero
 /// here — the remainder is in the book, not in the return value.
 #[derive(Clone, Debug, PartialEq, Eq)]
